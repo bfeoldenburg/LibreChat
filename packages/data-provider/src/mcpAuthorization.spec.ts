@@ -9,6 +9,7 @@ describe('internal MCP authorization configuration', () => {
     ).toEqual({
       enabled: false,
       apiKeyEnv: 'MCP_AUTHORIZATION_API_KEY',
+      groupCatalogPageSize: 100,
     });
     expect(BASE_ONLY_CONFIG_SECTIONS).toContain('mcpAuthorization');
   });
@@ -21,6 +22,10 @@ describe('internal MCP authorization configuration', () => {
     { tenantId: '' },
     { tenantId: '   ' },
     { tenantId: '__SYSTEM__' },
+    { groupCatalogPageSize: 0 },
+    { groupCatalogPageSize: 501 },
+    { groupCatalogPageSize: 1.5 },
+    { groupCatalogPageSize: '100' },
     { enabled: true, allowAll: true },
   ])('rejects an unsafe configuration: %p', (config) => {
     expect(mcpAuthorizationConfigSchema.safeParse(config).success).toBe(false);
@@ -33,7 +38,12 @@ describe('internal MCP authorization configuration', () => {
         apiKeyEnv: 'KB_CALLBACK_KEY',
         tenantId: 'bfe',
       }),
-    ).toEqual({ enabled: true, apiKeyEnv: 'KB_CALLBACK_KEY', tenantId: 'bfe' });
+    ).toEqual({
+      enabled: true,
+      apiKeyEnv: 'KB_CALLBACK_KEY',
+      tenantId: 'bfe',
+      groupCatalogPageSize: 100,
+    });
   });
 
   it.each([

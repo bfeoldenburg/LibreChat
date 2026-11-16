@@ -728,6 +728,7 @@ actions:
 # mcpAuthorization:
 #   enabled: true
 #   apiKeyEnv: MCP_AUTHORIZATION_API_KEY
+#   groupCatalogPageSize: 100 # Default and maximum requested page size (1–500).
 #   # tenantId: your-librechat-tenant  # omit for tenantless installations
 # See docs/bfe/mcp-authorization.md for the callback contract and trust boundary.
 

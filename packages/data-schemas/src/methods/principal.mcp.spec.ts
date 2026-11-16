@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
+import { _resetStrictCache } from '~/models/plugins/tenantIsolation';
 import { tenantStorage, runAsSystem } from '~/config/tenantContext';
 import { createPrincipalMethods } from './principal';
 import { createModels } from '~/models';
@@ -44,6 +45,7 @@ describe('getMCPGroupMembership', () => {
         userId,
         tenantId: null,
         groupIds: [groupId],
+        groups: [{ id: groupId, name: 'Wissen lesen', updatedAt: expect.any(String) }],
       });
     },
   );
@@ -65,6 +67,7 @@ describe('getMCPGroupMembership', () => {
       userId,
       tenantId: null,
       groupIds: [],
+      groups: [],
     });
   });
 
@@ -90,6 +93,7 @@ describe('getMCPGroupMembership', () => {
         userId: tenantA.userId,
         tenantId: 'a',
         groupIds: [tenantA.groupId],
+        groups: [{ id: tenantA.groupId, name: 'Wissen lesen', updatedAt: expect.any(String) }],
       });
       expect(await methods.getMCPGroupMembership(tenantB.userId)).toBeNull();
     });
@@ -101,4 +105,82 @@ describe('getMCPGroupMembership', () => {
       expect(await methods.getMCPGroupMembership(id)).toBeNull();
     },
   );
+});
+
+describe('MCP group metadata and catalog storage', () => {
+  it('uses stable fallbacks for legacy groups without modification timestamps', async () => {
+    const { userId, groupId } = await seed();
+    const createdAt = new Date('2020-01-02T03:04:05.000Z');
+    await mongoose.models.Group.collection.updateOne(
+      { _id: new mongoose.Types.ObjectId(groupId) },
+      { $unset: { updatedAt: '' }, $set: { createdAt } },
+    );
+    let catalog = await methods.getMCPGroupCatalog({ limit: 10 });
+    expect(catalog.groups[0].updatedAt).toBe(createdAt.toISOString());
+    expect((await methods.getMCPGroupMembership(userId))?.groups).toEqual(catalog.groups);
+    await mongoose.models.Group.collection.updateOne(
+      { _id: new mongoose.Types.ObjectId(groupId) },
+      { $unset: { createdAt: '' } },
+    );
+    catalog = await methods.getMCPGroupCatalog({ limit: 10 });
+    expect(catalog.groups[0].updatedAt).toBe(
+      new mongoose.Types.ObjectId(groupId).getTimestamp().toISOString(),
+    );
+    expect((await methods.getMCPGroupMembership(userId))?.groups).toEqual(catalog.groups);
+    const renamed = await mongoose.models.Group.findOneAndUpdate(
+      { _id: groupId },
+      { name: 'Neuer Name' },
+      { new: true },
+    );
+    expect((await methods.getMCPGroupCatalog({ limit: 10 })).groups[0]).toEqual({
+      id: groupId,
+      name: 'Neuer Name',
+      updatedAt: renamed.updatedAt.toISOString(),
+    });
+  });
+
+  it('fails closed for invalid persisted group metadata', async () => {
+    const { userId, groupId } = await seed();
+    await mongoose.models.Group.collection.updateOne(
+      { _id: new mongoose.Types.ObjectId(groupId) },
+      { $unset: { name: '' } },
+    );
+    await expect(methods.getMCPGroupMembership(userId)).rejects.toThrow(TypeError);
+    await expect(methods.getMCPGroupCatalog({ limit: 10 })).rejects.toThrow(TypeError);
+  });
+
+  it.each([
+    { limit: 0 },
+    { limit: 501 },
+    { limit: NaN },
+    { limit: 1.5 },
+    { limit: 1, cursor: 'invalid' },
+    { limit: 1, cursor: '507F1F77BCF86CD799439011' },
+  ])('rejects unbounded or invalid storage pagination: %p', async (page) => {
+    const find = jest.spyOn(mongoose.models.Group, 'find');
+    await expect(methods.getMCPGroupCatalog(page)).rejects.toThrow(TypeError);
+    expect(find).not.toHaveBeenCalled();
+  });
+
+  it('refuses unscoped primary reads in strict tenant mode', async () => {
+    const { userId } = await seed();
+    const strict = process.env.TENANT_ISOLATION_STRICT;
+    process.env.TENANT_ISOLATION_STRICT = 'true';
+    _resetStrictCache();
+    try {
+      await expect(methods.getMCPGroupMembership(userId)).rejects.toThrow();
+      await expect(methods.getMCPGroupCatalog({ limit: 10 })).rejects.toThrow();
+      await tenantStorage.run({ tenantId: 'a' }, async () => {
+        const own = await seed('tenant-user');
+        const catalog = await methods.getMCPGroupCatalog({ limit: 10 });
+        expect(catalog.tenantId).toBe('a');
+        expect(catalog.groups.map((group) => group.id)).toEqual([own.groupId]);
+        expect((await methods.getMCPGroupMembership(own.userId))?.groups).toEqual(catalog.groups);
+      });
+    } finally {
+      if (strict === undefined) delete process.env.TENANT_ISOLATION_STRICT;
+      else process.env.TENANT_ISOLATION_STRICT = strict;
+      _resetStrictCache();
+    }
+  });
 });

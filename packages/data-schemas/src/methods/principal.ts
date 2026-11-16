@@ -1,10 +1,25 @@
 import { PrincipalType, SystemRoles } from 'librechat-data-provider';
-import type { MCPGroupMembership } from 'librechat-data-provider';
+import type {
+  MCPGroup,
+  MCPGroupCatalog,
+  MCPGroupMembership,
+  MCPGroupCatalogPageRequest,
+} from 'librechat-data-provider';
 import type { Model } from 'mongoose';
+import type { IGroup } from '~/types';
 import { tenantPartitionFilter } from '~/models/plugins/tenantIsolation';
 import { isCanonicalObjectIdString } from '~/utils/objectId';
 
 const systemRoleNames: ReadonlySet<string> = new Set(Object.values(SystemRoles));
+
+function groupMetadata(group: Pick<IGroup, '_id' | 'name' | 'updatedAt' | 'createdAt'>): MCPGroup {
+  if (typeof group.name !== 'string' || group.name.length === 0) {
+    throw new TypeError('Invalid group metadata');
+  }
+  // Old imports may predate timestamps. ObjectId time is a stable creation fallback.
+  const updatedAt = group.updatedAt ?? group.createdAt ?? group._id.getTimestamp();
+  return { id: group._id.toString(), name: group.name, updatedAt: updatedAt.toISOString() };
+}
 
 /**
  * What principal resolution reads of a user (their role and external identity), and the tenant
@@ -22,6 +37,8 @@ export interface PrincipalMethods {
   findPrincipalUser: (userId: string) => Promise<PrincipalUser | null>;
   /** Uncached primary reads. null means absent, outside the partition, or being deleted. */
   getMCPGroupMembership: (userId: string) => Promise<MCPGroupMembership | null>;
+  /** All groups in the active partition, including groups with no members. Primary reads. */
+  getMCPGroupCatalog: (page: MCPGroupCatalogPageRequest) => Promise<MCPGroupCatalog>;
 }
 
 /** Principal lookups for the admin API, in the caller's tenant partition or by id. */
@@ -116,17 +133,48 @@ export function createPrincipalMethods(mongoose: typeof import('mongoose')): Pri
     }
     // Match LibreChat's existing member key: external id when present, otherwise local id.
     const memberId = user.idOnTheSource || userId;
-    const Group = mongoose.models.Group as Model<{ memberIds: string[] }>;
+    const Group = mongoose.models.Group as Model<IGroup>;
     const groups = await Group.find({ memberIds: memberId, ...partition })
-      .select('_id')
+      .select('_id name updatedAt createdAt')
+      .sort({ _id: 1 })
       .read('primary')
       .lean();
+    const metadata = groups.map(groupMetadata);
     return {
       userId,
       tenantId: user.tenantId || null,
-      groupIds: groups.map((group) => group._id.toString()).sort(),
+      groupIds: metadata.map((group) => group.id),
+      groups: metadata,
     };
   }
 
-  return { principalExists, findPrincipalUser, getMCPGroupMembership };
+  async function getMCPGroupCatalog(page: MCPGroupCatalogPageRequest): Promise<MCPGroupCatalog> {
+    if (
+      !Number.isInteger(page.limit) ||
+      page.limit < 1 ||
+      page.limit > 500 ||
+      (page.cursor !== undefined && !isCanonicalObjectIdString(page.cursor))
+    ) {
+      throw new TypeError('Invalid group catalog page');
+    }
+    const partition = tenantPartitionFilter('getMCPGroupCatalog');
+    const Group = mongoose.models.Group as Model<IGroup>;
+    const rows = await Group.find({
+      ...partition,
+      ...(page.cursor ? { _id: { $gt: page.cursor } } : {}),
+    })
+      .select('_id name updatedAt createdAt')
+      .sort({ _id: 1 })
+      .limit(page.limit + 1)
+      .read('primary')
+      .lean();
+    const groups = rows.slice(0, page.limit).map(groupMetadata);
+    return {
+      tenantId: 'tenantId' in partition ? partition.tenantId : null,
+      groups,
+      nextCursor: rows.length > page.limit ? groups[groups.length - 1].id : null,
+    };
+  }
+
+  return { principalExists, findPrincipalUser, getMCPGroupMembership, getMCPGroupCatalog };
 }

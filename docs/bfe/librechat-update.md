@@ -3,7 +3,8 @@
 Stand: 16.11.2026. Entwicklungsbranch: `bfe/mcp-groups`.
 Die Erweiterung basiert auf dem Fork-`main` bei Commit
 `9363db541ecd4e23ab6a41dca47ca48ee2bd418e` vom 15.11.2026 und ergänzt die
-geschützte Gruppenabfrage. Die Versionsangabe `v0.8.9-rc1` in `package.json`
+geschützte Gruppenabfrage. Die lokale P0-Erweiterung um Gruppennamen und
+Gruppenkatalog baut auf `fb9091168c41` auf und benötigt erneut ein eigenes Image. Die Versionsangabe `v0.8.9-rc1` in `package.json`
 bezeichnet diesen Quellstand nicht eindeutig; der gleichnamige Release-Tag ist
 älter. Der MCP-Dienst und die Datenbankfreigaben folgen anschließend.
 
@@ -89,6 +90,7 @@ In der vorhandenen `/var/LibreChat/librechat.yaml` auf oberster Ebene ergänzen:
 mcpAuthorization:
   enabled: true
   apiKeyEnv: MCP_AUTHORIZATION_API_KEY
+  groupCatalogPageSize: 100
 ```
 
 Die vorhandene YAML-Datei samt Versionsangabe und weiteren Einstellungen
@@ -201,11 +203,20 @@ process.exitCode = response.ok ? 0 : 1;
 NODE
 ```
 
-Erwartet wird `200` mit `userId`, `tenantId` und `groupIds`. Eine leere
+Erwartet wird `200` mit `userId`, `tenantId`, `groupIds` und `groups`.
+`groups` enthält dieselben IDs mit Namen und gespeichertem `updatedAt`. Eine leere
 Gruppenliste ist bei einem Benutzer ohne Gruppen gültig. Bei `404` YAML-Aktivierung,
 lokale Benutzer-ID und Mandantenpartition prüfen; bei `503` die Schlüsselkonfiguration
 und den Datenbankzugriff. Der vollständige Vertrag steht in
 [docs/bfe/mcp-authorization.md](mcp-authorization.md).
+
+Den vollständigen Gruppenkatalog ebenfalls intern mit demselben Schlüssel über
+`GET /api/internal/mcp/group-catalog` prüfen: alle Seiten bis `nextCursor: null`
+lesen, einschließlich einer Gruppe ohne Mitglieder. Die Namensänderung einer
+Testgruppe muss bei beiden Routen mit neuerem `updatedAt` erscheinen. Den
+Rückruf anschließend aus dem vorgesehenen Dienstnetz testen; ein Aufruf im
+LibreChat-Container allein belegt diese Erreichbarkeit nicht. Der öffentliche
+Proxy darf die internen Routen nicht freigeben.
 
 ## Rückwechsel
 
@@ -221,10 +232,13 @@ und diesen im Override eintragen. Danach wieder den gesamten Stack neu erstellen
 
 ## Prüfstand dieser Änderung
 
-Die Gruppenabfrage hat auf der oben genannten `main`-Basis lokal 950 Tests,
-alle drei betroffenen Typprüfungen, Paket-Builds und die statischen Prüfungen
-einschließlich Konfigurationsmigration bestanden. `npm run lighthouse`
-einschließlich Produktionsbuild wurde ausgeführt und scheiterte vor der Messung
-beim Registrieren des Testbenutzers am Link `Sign up`;
-eine erfolgreiche Performance-Messung steht aus. Ein produktiver Rollout und
-der Entra-Test auf `mediadev` stehen aus.
+Die bisherige Mitgliedschaftsabfrage aus `fb9091168c41` läuft laut Betreiber
+bereits auf `mediadev`. Gruppenmetadaten und Katalog sind eine anschließende
+lokale Erweiterung; deren Bereitstellung ist noch nicht erfolgt.
+
+Der aktuelle lokale Prüfstand einschließlich Typprüfungen, Paket-Builds,
+statischer Prüfungen und Lighthouse steht in
+[docs/bfe/mcp-authorization.md](mcp-authorization.md).
+Offen bleiben der neue Image-Build und Rollout, reale Rückrufe aus dem Dienstnetz,
+Entra-/Gruppen-/Chat-Smoke-Tests nach dem Update und die SDK-Kompatibilitätsprüfung
+mit dem späteren MCP-Service. Push und Serverupdate übernimmt der Betreiber.
