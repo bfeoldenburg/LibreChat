@@ -1,4 +1,5 @@
 import { PrincipalType, SystemRoles } from 'librechat-data-provider';
+import type { MCPGroupMembership } from 'librechat-data-provider';
 import type { Model } from 'mongoose';
 import { tenantPartitionFilter } from '~/models/plugins/tenantIsolation';
 import { isCanonicalObjectIdString } from '~/utils/objectId';
@@ -19,6 +20,8 @@ export interface PrincipalUser {
 export interface PrincipalMethods {
   principalExists: (principalType: PrincipalType, principalId: string) => Promise<boolean>;
   findPrincipalUser: (userId: string) => Promise<PrincipalUser | null>;
+  /** Uncached primary reads. null means absent, outside the partition, or being deleted. */
+  getMCPGroupMembership: (userId: string) => Promise<MCPGroupMembership | null>;
 }
 
 /** Principal lookups for the admin API, in the caller's tenant partition or by id. */
@@ -94,5 +97,36 @@ export function createPrincipalMethods(mongoose: typeof import('mongoose')): Pri
     };
   }
 
-  return { principalExists, findPrincipalUser };
+  async function getMCPGroupMembership(userId: string): Promise<MCPGroupMembership | null> {
+    if (!isCanonicalObjectIdString(userId)) {
+      return null;
+    }
+    const partition = tenantPartitionFilter('getMCPGroupMembership');
+    const User = mongoose.models.User as Model<{
+      idOnTheSource?: string | null;
+      tenantId?: string | null;
+      agentTriggerDeletionStartedAt?: Date | null;
+    }>;
+    const user = await User.findOne({ _id: userId, ...partition })
+      .select('idOnTheSource tenantId +agentTriggerDeletionStartedAt')
+      .read('primary')
+      .lean();
+    if (user == null || user.agentTriggerDeletionStartedAt != null) {
+      return null;
+    }
+    // Match LibreChat's existing member key: external id when present, otherwise local id.
+    const memberId = user.idOnTheSource || userId;
+    const Group = mongoose.models.Group as Model<{ memberIds: string[] }>;
+    const groups = await Group.find({ memberIds: memberId, ...partition })
+      .select('_id')
+      .read('primary')
+      .lean();
+    return {
+      userId,
+      tenantId: user.tenantId || null,
+      groupIds: groups.map((group) => group._id.toString()).sort(),
+    };
+  }
+
+  return { principalExists, findPrincipalUser, getMCPGroupMembership };
 }

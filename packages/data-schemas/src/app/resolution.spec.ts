@@ -67,6 +67,25 @@ const baseConfig = {
 } as unknown as AppConfig;
 
 describe('mergeConfigOverrides', () => {
+  it('preserves the operator-owned MCP membership boundary through stored overrides and tombstones', () => {
+    const policy = { enabled: true, apiKeyEnv: 'BFE_MCP_CALLBACK_KEY', tenantId: 'bfe' };
+    const base = { ...baseConfig, config: { mcpAuthorization: policy } };
+    const configs = [
+      fakeConfig({ mcpAuthorization: { enabled: false, tenantId: 'other' } }, 10),
+      fakeConfig({}, 20, ['mcpAuthorization', 'mcpAuthorization.apiKeyEnv']),
+      fakeConfig(
+        { mcpAuthorization: { enabled: true, apiKeyEnv: 'JWT_SECRET' } },
+        0,
+        undefined,
+        BASE_CONFIG_PRINCIPAL_ID,
+      ),
+    ];
+    expect(mergeConfigOverrides(base, configs).config.mcpAuthorization).toEqual(policy);
+    expect(resolveRawConfig({ mcpAuthorization: policy }, configs).mcpAuthorization).toEqual(
+      policy,
+    );
+  });
+
   it('returns base config when configs array is empty', () => {
     expect(mergeConfigOverrides(baseConfig, [])).toBe(baseConfig);
   });

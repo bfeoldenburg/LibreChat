@@ -723,6 +723,14 @@ actions:
 #   maxActionPreviewChars: 16384  # App tool arguments and chat message preview
 
 # Example MCP Servers Object Structure
+# Internal server-to-server group lookup for an operator-owned MCP service.
+# Only librechat.yaml may configure this boundary. The secret stays in process ENV.
+# mcpAuthorization:
+#   enabled: true
+#   apiKeyEnv: MCP_AUTHORIZATION_API_KEY
+#   # tenantId: your-librechat-tenant  # omit for tenantless installations
+# See docs/bfe/mcp-authorization.md for the callback contract and trust boundary.
+
 # mcpServers:
 #   everything:
 #     # type: sse # type can optionally be omitted

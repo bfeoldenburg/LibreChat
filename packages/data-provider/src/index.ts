@@ -31,6 +31,7 @@ export * from './models';
 export * from './families';
 /* mcp */
 export * from './mcp';
+export * from './mcpAuthorization';
 export * from './mcp/appMime';
 export * from './mcp/csp';
 /* RBAC */
