@@ -71,6 +71,73 @@ Der Build erfolgt direkt auf dem Dienstserver, daher ist kein Push in eine
 Container-Registry erforderlich. Der ausgegebene Image-Tag gehört zu genau
 diesem Git-Commit.
 
+## Automatischer Neubau und Wechsel der Image-Kennung
+
+Ergänzung vom 17.11.2026: `rebuild.sh` übernimmt den Neubau aus dem vorhandenen
+Quellcheckout und den Wechsel des Images im Betriebs-Override. Das Skript ist
+lokal vorbereitet; die Installation auf `mediadev` bleibt beim Betreiber.
+Es benötigt Bash, Python 3 und Docker mit Compose-Plugin. Node.js und zusätzliche
+Python-Pakete sind auf dem Host nicht erforderlich.
+
+Nach Übertragung beziehungsweise Aktualisierung der Quellen das Skript aus dem
+Quellcheckout in die bestehende Installation übernehmen:
+
+```bash
+install -m 755 /var/LibreChat-bfe-src/rebuild.sh /var/LibreChat/rebuild.sh
+/var/LibreChat/rebuild.sh --check
+/var/LibreChat/rebuild.sh
+```
+
+Die Standardpfade sind `/var/LibreChat-bfe-src` für die Quellen und
+`/var/LibreChat` für die Installation. Abweichungen können mit `--source-dir`
+und `--install-dir` angegeben werden. Das Skript baut den vorhandenen Quellstand;
+Quellaktualisierungen wie `git pull --ff-only` erfolgen vorher durch den Betreiber.
+
+Ohne `--image` erhält jeder Build einen neuen Tag nach dem Muster
+`bfe/librechat:<Commit>-<UTC-Zeit>`. Lokale Git-Änderungen erscheinen zusätzlich
+als `dirty` im Tag. Bei Quellen ohne Git-Metadaten steht dort `local`.
+Mit einem eigenen Tag beispielsweise:
+
+```bash
+/var/LibreChat/rebuild.sh --image bfe/librechat:mein-build
+```
+
+Der Ablauf:
+
+1. Basis und Override zusammen mit `/var/LibreChat/.env` auflösen. Auch der
+   vorbereitete neue Override wird mit echtem Compose geprüft. Das Skript erlaubt
+   dabei ausschließlich die Änderung von `services.api.image` und
+   `services.api.pull_policy`; Ports, Umgebungswerte, Mounts und übrige Dienste
+   müssen gleich bleiben. Die aufgelösten ENV-Werte werden nicht ausgegeben.
+2. Das Quell-Dockerfile mit sichtbaren Docker-Fortschritts- und Fehlermeldungen
+   bauen. Es enthält Backend und Frontend. Git-Commit, Branch und Build-Zeit
+   werden über die vorhandenen Dockerfile-Buildargumente mitgegeben.
+3. Nach erfolgreichem Build das vorherige Override unter
+   `/var/LibreChat/.rebuild-backups/<UTC-Zeit>/docker-compose.override.yml` sichern
+   und die Image-Kennung sowie `pull_policy: never` atomar übernehmen. Eine
+   während des Builds bemerkte Konfigurationsänderung führt zum Abbruch, bevor
+   das Override ersetzt oder ein Container neu erstellt wird.
+4. `/var/LibreChat/recreate.sh` ohne Dienstauswahl aufrufen. Dieses vorhandene
+   Skript verarbeitet weiterhin `/var/LibreChat/docker-compose.yml` und
+   `/var/LibreChat/docker-compose.override.yml` gemeinsam und erstellt den
+   gesamten Stack mit den aktiven Profilen neu.
+
+`--check` führt ausschließlich die Konfigurationsprüfung durch. Bei einem
+Build- oder Image-Prüffehler bleiben Override und laufende Container unverändert.
+Scheitert erst das Recreate, bleiben der neue Override und die ausgegebene
+Sicherung erhalten; es erfolgt kein automatischer Rückwechsel möglicherweise
+bereits erneuerter Container. Für einen Rückwechsel den gesicherten Override
+wiederherstellen und `/var/LibreChat/recreate.sh` ausführen.
+
+Das Override muss für `services` und `services.api` normale eingerückte
+YAML-Blöcke verwenden. Nicht unterstützte Inline-Formen werden vor dem Build
+abgewiesen. Bestehende Compose-Tags wie `!override` bleiben erhalten.
+
+Lokale Prüfung: `python3 scripts/test_rebuild.py -v`. Die Tests verwenden die
+echte Compose-Konfigurationsauflösung mit künstlichen Dateien; Builds,
+Image-Inspektion und Recreate werden abgefangen. Es werden keine echten Images
+gebaut und keine Container gestartet oder ersetzt.
+
 ## 3. Rückrufschlüssel und LibreChat-Konfiguration ergänzen
 
 Mit `openssl rand -hex 32` einen eigenen Rückrufschlüssel erzeugen. In der

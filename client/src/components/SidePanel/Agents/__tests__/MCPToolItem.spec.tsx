@@ -86,6 +86,27 @@ function setup(overrides: Partial<React.ComponentProps<typeof MCPToolItem>> = {}
 }
 
 describe('MCPToolItem', () => {
+  test('shows the database title and keeps the technical name available', () => {
+    const props = setup({
+      tool: {
+        ...tool,
+        tool_id: 'search_db_1234_mcp_wissen',
+        metadata: { ...tool.metadata, name: 'search_db_1234', title: ' QM-Wissen durchsuchen ' },
+      },
+    });
+    const row = screen.getByRole('button', { name: 'QM-Wissen durchsuchen' });
+    expect(row).toHaveAttribute('title', 'search_db_1234');
+    expect(screen.getByText('QM-Wissen durchsuchen')).toBeVisible();
+    fireEvent.click(row);
+    expect(props.onToggleSelect).toHaveBeenCalledTimes(1);
+    expect(props.tool.tool_id).toBe('search_db_1234_mcp_wissen');
+  });
+
+  test('falls back to the technical name for a blank display title', () => {
+    setup({ tool: { ...tool, metadata: { ...tool.metadata, title: ' ' } } });
+    expect(screen.getByRole('button', { name: 'execute' })).toBeVisible();
+  });
+
   test('clicking the row (not just a checkbox) toggles selection', () => {
     const props = setup();
     fireEvent.click(screen.getByRole('button', { name: 'execute' }));

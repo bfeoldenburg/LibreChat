@@ -506,6 +506,52 @@ describe('createMCPToolCacheService', () => {
   });
 
   describe('tool construction and reads', () => {
+    it('preserves display titles without changing cached or model-facing tool identities', async () => {
+      const deps = createMockDeps();
+      const name = 'search_db_1234';
+      const key = toolName(name, 'wissen');
+      const service = createMCPToolCacheService(deps);
+      const first = await service.updateMCPServerTools({
+        userId: 'u1',
+        serverName: 'wissen',
+        tools: [{ name, title: ' QM-Wissen durchsuchen ', description: 'Search QM' }],
+      });
+      const renamed = await service.updateMCPServerTools({
+        userId: 'u1',
+        serverName: 'wissen',
+        tools: [{ name, title: 'Qualitätswissen durchsuchen', description: 'Search QM' }],
+      });
+
+      expect(Object.keys(first ?? {})).toEqual([key]);
+      expect(Object.keys(renamed ?? {})).toEqual([key]);
+      expect(first?.[key]?.title).toBe('QM-Wissen durchsuchen');
+      expect(renamed?.[key]?.title).toBe('Qualitätswissen durchsuchen');
+      expect(first?.[key]?.function).toEqual(renamed?.[key]?.function);
+      expect(first?.[key]?.function.name).toBe(key);
+      expect(first?.[key]?.function).not.toHaveProperty('title');
+      expect(deps.setCachedTools).toHaveBeenLastCalledWith(renamed, {
+        userId: 'u1',
+        serverName: 'wissen',
+        configGeneration: undefined,
+      });
+    });
+
+    it.each([
+      { title: undefined, annotations: { title: ' Annotated tool ' }, expected: 'Annotated tool' },
+      { title: 'Primary', annotations: { title: 'Secondary' }, expected: 'Primary' },
+      { title: ' ', annotations: { title: 'Fallback' }, expected: 'Fallback' },
+      { title: ' ', annotations: { title: ' ' }, expected: undefined },
+      { title: undefined, annotations: undefined, expected: undefined },
+    ])('uses optional MCP display titles: %j', async ({ title, annotations, expected }) => {
+      const result = await createMCPToolCacheService(createMockDeps()).updateMCPServerTools({
+        userId: 'u1',
+        serverName: 'srv',
+        tools: [{ name: 'execute', title, annotations }],
+      });
+      expect(result?.[toolName('execute', 'srv')]?.title).toBe(expected);
+      expect(result?.[toolName('execute', 'srv')]?.function.name).toBe(toolName('execute', 'srv'));
+    });
+
     it('returns empty for a null tool list without caching', async () => {
       const deps = createMockDeps();
       const result = await createMCPToolCacheService(deps).updateMCPServerTools({

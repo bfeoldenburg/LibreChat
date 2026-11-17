@@ -902,6 +902,8 @@ export type TPluginAuthConfig = z.infer<typeof tPluginAuthConfigSchema>;
 
 export const tPluginSchema = z.object({
   name: z.string(),
+  /** Optional MCP display title; selection and invocation use pluginKey. */
+  title: z.string().optional(),
   pluginKey: z.string(),
   description: z.string().optional(),
   icon: z.string().optional(),

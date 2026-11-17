@@ -64,6 +64,7 @@ export default function MCPToolItem({
   const [expanded, setExpanded] = useState(false);
 
   const description = tool.metadata.description?.trim();
+  const displayName = tool.metadata.title?.trim() || tool.metadata.name;
   const detailsId = `mcp-tool-details-${tool.tool_id}`;
 
   return (
@@ -73,7 +74,8 @@ export default function MCPToolItem({
           type="button"
           onClick={onToggleSelect}
           aria-pressed={isSelected}
-          aria-label={tool.metadata.name}
+          aria-label={displayName}
+          title={tool.metadata.name}
           className={cn(
             'flex min-w-0 flex-1 items-center gap-2.5 rounded-lg p-2 text-start',
             'focus-visible:ring-ring-primary focus:outline-hidden focus-visible:ring-2',
@@ -88,9 +90,7 @@ export default function MCPToolItem({
           >
             {isSelected && <Check className="size-4" />}
           </span>
-          <span className="text-text-primary min-w-0 flex-1 truncate text-sm">
-            {tool.metadata.name}
-          </span>
+          <span className="text-text-primary min-w-0 flex-1 truncate text-sm">{displayName}</span>
         </button>
         <div className="flex shrink-0 items-center gap-0.5">
           {deferredToolsEnabled && (

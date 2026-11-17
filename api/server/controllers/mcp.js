@@ -261,6 +261,7 @@ const getMCPTools = async (req, res) => {
             ]);
             server.tools.push({
               name: toolName,
+              title: toolData.title,
               pluginKey: toolKey,
               description: toolData.function.description || '',
               /** Upstream identity for keys that stripped a redundant

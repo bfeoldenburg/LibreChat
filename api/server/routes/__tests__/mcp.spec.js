@@ -4240,6 +4240,42 @@ describe('MCP Routes', () => {
       });
     });
 
+    it('exposes database display titles while retaining distinct selection keys', async () => {
+      const { formatMCPServerTools } = require('@librechat/api');
+      const serverConfig = { type: 'streamable-http', url: 'https://wissen.example.com/mcp' };
+      const serverTools = formatMCPServerTools('bfe-wissen', [
+        { name: 'search_db_1234', title: 'QM-Wissen durchsuchen', description: 'Search QM' },
+        {
+          name: 'search_db_5678',
+          title: 'QM-Wissen durchsuchen',
+          description: 'Search another QM',
+        },
+      ]);
+      mockResolveAllMcpConfigs.mockResolvedValueOnce({ 'bfe-wissen': serverConfig });
+      mockLoadMCPServerCatalogs.mockResolvedValueOnce({
+        serverTools: new Map([['bfe-wissen', serverTools]]),
+        serversWithoutTools: [],
+      });
+
+      const response = await request(app).get('/api/mcp/tools');
+
+      expect(response.status).toBe(200);
+      expect(response.body.servers['bfe-wissen'].tools).toEqual([
+        {
+          name: 'search_db_1234',
+          title: 'QM-Wissen durchsuchen',
+          pluginKey: 'search_db_1234_mcp_bfe-wissen',
+          description: 'Search QM',
+        },
+        {
+          name: 'search_db_5678',
+          title: 'QM-Wissen durchsuchen',
+          pluginKey: 'search_db_5678_mcp_bfe-wissen',
+          description: 'Search another QM',
+        },
+      ]);
+    });
+
     it('renders an authoritative empty catalog as a configured server', async () => {
       const serverConfig = { type: 'sse', url: 'https://empty.example.com/sse' };
       mockResolveAllMcpConfigs.mockResolvedValueOnce({ 'empty-server': serverConfig });

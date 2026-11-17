@@ -58,6 +58,8 @@ export interface MCPResource {
 export interface LCFunctionTool {
   type: 'function';
   ['function']: LCTool;
+  /** Human-readable MCP title for UI display; never used as the tool-call identity. */
+  title?: string;
   /** Raw upstream tool name when the model-facing key stripped a redundant
    *  server-name prefix — tool calls must send THIS name to the server. */
   serverToolName?: string;
