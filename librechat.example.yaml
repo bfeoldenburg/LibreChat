@@ -1564,6 +1564,9 @@ endpoints:
 #   serverFileSizeLimit: 100  # Global server file size limit in MB
 #   avatarSizeLimit: 2  # Limit for user avatar image size in MB
 #   imageGeneration: # Image Gen settings, either percentage or px
+#     preserveOriginal: false # true: keep original raster bytes, overriding percentage/px
+#     # Preserves EXIF and animation; does not create a browser/model preview.
+#     # Unsupported or corrupt originals are rejected without conversion.
 #     percentage: 100
 #     px: 1024
 #   # Client-side image resizing to prevent upload errors

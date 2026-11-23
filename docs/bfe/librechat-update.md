@@ -10,9 +10,9 @@ bezeichnet diesen Quellstand nicht eindeutig; der gleichnamige Release-Tag ist
 
 Die folgenden Befehle auf `mediadev` mit Schreibzugriff auf `/var` und
 Docker-Berechtigung ausführen. Die bestehende Installation liegt unter
-`/var/LibreChat`. Die Quellen für den Image-Build werden separat abgelegt;
-die vorhandene Entra-Konfiguration und die Compose-Dateien werden gezielt
-weiterverwendet.
+`/var/LibreChat`. Quellen, Image-Build und Betriebsinstallation liegen in
+diesem Verzeichnis. Die vorhandene Entra-Konfiguration und die Compose-Dateien
+werden weiterverwendet.
 
 ## 1. Bestehende Konfiguration sichern
 
@@ -31,31 +31,22 @@ printf 'Sicherung: %s\n' "$LIBRECHAT_BFE_BACKUP"
 den tatsächlichen Namen verwenden. Den ausgegebenen Sicherungspfad für einen
 späteren Rückwechsel notieren.
 
-## 2. Quellen laden und eigenes Image bauen
+## 2. Quellen aktualisieren und eigenes Image bauen
 
-Einmalig einen separaten Checkout anlegen:
+Die Änderungen des Fork-Branches in die bestehende Arbeitskopie unter
+`/var/LibreChat` übernehmen. Dieser Weg aktualisiert den aktuellen lokalen
+Branch per Fast-Forward und setzt keinen separaten Quellcheckout voraus:
 
 ```bash
-git clone --single-branch --branch bfe/mcp-groups \
-  https://github.com/bfeoldenburg/LibreChat.git /var/LibreChat-bfe-src
+cd /var/LibreChat &&
+git pull --ff-only https://github.com/bfeoldenburg/LibreChat.git bfe/mcp-groups
 ```
 
-Falls `/var/LibreChat-bfe-src` bereits auf dem bisherigen Branch
-`bfe/mcp-database-authorization` angelegt wurde, dort zuerst den neuen Branch
-laden. Der Checkout muss dafür ohne eigene Änderungen sein:
+Nach der Quellenaktualisierung kann das nachfolgend beschriebene Rebuild-Skript
+verwendet werden. Für einen manuellen Image-Build im selben Verzeichnis:
 
 ```bash
-cd /var/LibreChat-bfe-src
-git status --short
-git fetch origin refs/heads/bfe/mcp-groups:refs/remotes/origin/bfe/mcp-groups
-git switch --track origin/bfe/mcp-groups
-```
-
-Für den ersten und jeden weiteren Build im Checkout `bfe/mcp-groups`:
-
-```bash
-cd /var/LibreChat-bfe-src
-git pull --ff-only
+cd /var/LibreChat
 LIBRECHAT_BFE_COMMIT="$(git rev-parse HEAD)"
 LIBRECHAT_BFE_IMAGE="bfe/librechat:$(git rev-parse --short=12 HEAD)"
 docker build --pull \
@@ -73,24 +64,25 @@ diesem Git-Commit.
 
 ## Automatischer Neubau und Wechsel der Image-Kennung
 
-Ergänzung vom 17.11.2026: `rebuild.sh` übernimmt den Neubau aus dem vorhandenen
-Quellcheckout und den Wechsel des Images im Betriebs-Override. Das Skript ist
-lokal vorbereitet; die Installation auf `mediadev` bleibt beim Betreiber.
+Ergänzung vom 17.11.2026: `rebuild.sh` übernimmt den Neubau aus `/var/LibreChat`
+und den Wechsel des Images im Betriebs-Override. Der Betreiber hat die erste
+Skriptversion dort aufgerufen; der zuvor voreingestellte separate Quellpfad
+war für diese Installation falsch. Die Korrektur verwendet jetzt standardmäßig
+das Installationsverzeichnis als Build-Quelle.
 Es benötigt Bash, Python 3 und Docker mit Compose-Plugin. Node.js und zusätzliche
 Python-Pakete sind auf dem Host nicht erforderlich.
 
-Nach Übertragung beziehungsweise Aktualisierung der Quellen das Skript aus dem
-Quellcheckout in die bestehende Installation übernehmen:
+Nach Übertragung beziehungsweise Aktualisierung der Quellen und des korrigierten
+Skripts direkt aufrufen:
 
 ```bash
-install -m 755 /var/LibreChat-bfe-src/rebuild.sh /var/LibreChat/rebuild.sh
 /var/LibreChat/rebuild.sh --check
 /var/LibreChat/rebuild.sh
 ```
 
-Die Standardpfade sind `/var/LibreChat-bfe-src` für die Quellen und
-`/var/LibreChat` für die Installation. Abweichungen können mit `--source-dir`
-und `--install-dir` angegeben werden. Das Skript baut den vorhandenen Quellstand;
+Quellen und Installation liegen standardmäßig beide unter `/var/LibreChat`.
+`--install-dir` legt das gemeinsame Verzeichnis fest; nur bei ausdrücklich
+getrennten Quellen zusätzlich `--source-dir` setzen. Das Skript baut den vorhandenen Quellstand;
 Quellaktualisierungen wie `git pull --ff-only` erfolgen vorher durch den Betreiber.
 
 Ohne `--image` erhält jeder Build einen neuen Tag nach dem Muster

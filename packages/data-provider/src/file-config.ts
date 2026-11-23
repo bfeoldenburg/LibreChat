@@ -680,6 +680,8 @@ export const fileConfigSchema = z.object({
   legacySearchProbeTimeoutMs: z.number().min(1).optional(),
   imageGeneration: z
     .object({
+      /** Store original raster bytes; takes precedence over percentage/px. */
+      preserveOriginal: z.boolean().optional(),
       percentage: z.number().min(0).max(100).optional(),
       px: z.number().min(0).optional(),
     })

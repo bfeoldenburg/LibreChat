@@ -30,6 +30,7 @@ const {
 const { logger, runAsSystem } = require('@librechat/data-schemas');
 const {
   sanitizeFilename,
+  prepareGeneratedImage,
   isMissingStorageError,
   createDeleteFileWithSecondaryStorage,
   finalizeFileDeletion,
@@ -1691,12 +1692,15 @@ async function saveBase64Image(
 ) {
   const retentionExpiryPromise = getRetentionExpiry(req);
   const appConfig = req.config;
-  const effectiveResolution = resolution ?? appConfig.fileConfig?.imageGeneration ?? 'high';
   const file_id = _file_id ?? v4();
   let filename = `${file_id}-${_filename}`;
   const { buffer: inputBuffer, type: declaredType } = base64ToBuffer(url);
 
-  const image = await resizeImageBuffer(inputBuffer, effectiveResolution, endpoint);
+  const image = await prepareGeneratedImage(
+    inputBuffer,
+    { config: appConfig.fileConfig?.imageGeneration, resolution, endpoint },
+    { resizeImageBuffer },
+  );
   /** Sharp re-encodes what it resizes, so the bytes being saved are not necessarily in the
    * format the data URL declared — an SVG arrives here and is rasterized to PNG. The record has
    * to describe the bytes, because `file.type` is handed to providers verbatim as `media_type`

@@ -34,9 +34,9 @@ const req = {
 
 const dataUrl = (mimeType, buffer) => `data:${mimeType};base64,${buffer.toString('base64')}`;
 
-const save = (url) =>
+const save = (url, request = req) =>
   saveBase64Image(url, {
-    req,
+    req: request,
     file_id: 'file-1',
     filename: 'tool_img_abc',
     endpoint: 'openAI',
@@ -99,5 +99,75 @@ describe('saveBase64Image records the media type of the bytes it saves', () => {
     const savedBuffer = saveBuffer.mock.calls.at(-1)[0].buffer;
 
     expect(file.type).toBe(resolveImageMimeType(await sharp(savedBuffer).metadata()));
+  });
+});
+
+describe('saveBase64Image original raster storage', () => {
+  const originalRequest = {
+    ...req,
+    config: { ...req.config, fileConfig: { imageGeneration: { preserveOriginal: true } } },
+  };
+
+  it('writes exact original bytes with detected MIME, owner, dimensions and EXIF', async () => {
+    const input = await sharp({
+      create: { width: 1024, height: 512, channels: 3, background: { r: 11, g: 22, b: 33 } },
+    })
+      .withMetadata({ orientation: 6 })
+      .jpeg()
+      .toBuffer();
+    const file = await save(dataUrl('image/png', input), originalRequest);
+    const { getStrategyFunctions } = require('~/server/services/Files/strategies');
+    const { saveBuffer } = getStrategyFunctions.mock.results.at(-1).value;
+    const saved = saveBuffer.mock.calls.at(-1)[0];
+    expect(saved.buffer).toEqual(input);
+    expect(saved.userId).toBe(req.user.id);
+    expect(saved.tenantId).toBe(req.user.tenantId);
+    expect(file).toMatchObject({
+      user: req.user.id,
+      type: 'image/jpeg',
+      width: 1024,
+      height: 512,
+      bytes: input.length,
+      filename: 'file-1-tool_img_abc.jpeg',
+    });
+    expect((await sharp(saved.buffer).metadata()).orientation).toBe(6);
+  });
+
+  it('keeps the default high-resolution resize when preservation is omitted', async () => {
+    const input = await sharp({
+      create: { width: 1024, height: 1024, channels: 3, background: { r: 1, g: 2, b: 3 } },
+    })
+      .png()
+      .toBuffer();
+    const file = await save(dataUrl('image/png', input));
+    expect(file.width).toBe(768);
+    expect(file.height).toBe(768);
+  });
+
+  it('preserves TIFF without claiming to create a browser-compatible preview', async () => {
+    const input = await sharp({
+      create: { width: 16, height: 8, channels: 3, background: { r: 1, g: 2, b: 3 } },
+    })
+      .tiff()
+      .toBuffer();
+    const file = await save(dataUrl('image/tiff', input), originalRequest);
+    const { getStrategyFunctions } = require('~/server/services/Files/strategies');
+    const { saveBuffer } = getStrategyFunctions.mock.results.at(-1).value;
+    expect(saveBuffer.mock.calls.at(-1)[0].buffer).toEqual(input);
+    expect(file.type).toBe('image/tiff');
+    expect(file.width).toBe(16);
+    expect(file.height).toBe(8);
+  });
+
+  it('does not store unsupported SVG as an original', async () => {
+    const { getStrategyFunctions } = require('~/server/services/Files/strategies');
+    const before = getStrategyFunctions.mock.calls.length;
+    const writes = db.createFile.mock.calls.length;
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"/>');
+    await expect(save(dataUrl('image/svg+xml', svg), originalRequest)).rejects.toThrow(
+      'Generated image cannot be preserved: invalid or unsupported raster image',
+    );
+    expect(getStrategyFunctions.mock.calls).toHaveLength(before);
+    expect(db.createFile.mock.calls).toHaveLength(writes);
   });
 });
