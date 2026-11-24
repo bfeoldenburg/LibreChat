@@ -79,6 +79,7 @@ import { ConnectionsRepository } from './ConnectionsRepository';
 import { MCPConnectionFactory } from './MCPConnectionFactory';
 import { processMCPEnv, isPluginSourced } from '~/utils/env';
 import { guardUnattendedOAuth } from './oauth/unattended';
+import { formatMCPImageJobResult } from './generation';
 import { OAuthLifecycleRelay } from './oauth/pending';
 import { getMCPAgentConnectionKey } from './utils';
 import { isOwnedAbortError } from '~/utils/errors';
@@ -1528,7 +1529,7 @@ Please follow these instructions when using tools from the respective MCP server
     toolName,
     provider,
     toolArguments,
-    imageContext,
+    requestMeta,
     options,
     tokenMethods,
     requestBody,
@@ -1561,7 +1562,7 @@ Please follow these instructions when using tools from the respective MCP server
     provider: t.Provider;
     toolArguments?: Record<string, unknown>;
     /** Host-only context factory; invoked afresh for each transport attempt. */
-    imageContext?: () => Record<string, string | boolean>;
+    requestMeta?: () => Record<string, unknown>;
     options?: RequestOptions;
     requestBody?: RequestBody;
     requestScopedConnections?: t.RequestScopedMCPConnectionStore;
@@ -2040,7 +2041,7 @@ Please follow these instructions when using tools from the respective MCP server
                   params: {
                     name: toolName,
                     arguments: toolArguments,
-                    ...(imageContext && { _meta: { 'librechat/image': imageContext() } }),
+                    ...(requestMeta && { _meta: requestMeta() }),
                   },
                 },
                 CallToolResultSchema,
@@ -2175,6 +2176,10 @@ Please follow these instructions when using tools from the respective MCP server
         }
         this.checkIdleConnections();
         const toolResult = result as t.MCPToolCallResponse;
+        if (requestMeta && toolName === 'generate_image') {
+          const image = formatMCPImageJobResult(toolResult);
+          if (image) return image;
+        }
         const admittedMCPApps = mcpApps ?? DEFAULT_MCP_APPS_POLICY;
 
         // The app routes reject OBO, Graph-token, and runtime body-placeholder configs, so do not

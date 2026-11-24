@@ -13,8 +13,14 @@ import { MongoMemoryServer } from 'mongodb-memory-server';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { createMCPImageInvoker, collectMCPImageAttachments } from '../../../api/src/mcp/generation';
+import {
+  createMCPImageInvoker,
+  collectMCPImageAttachments,
+  formatMCPImageJobResult,
+} from '../../../api/src/mcp/generation';
 import { createMCPMembershipRouter } from '../../../api/src/mcp/membership';
+import { createMCPImageStorage } from '../../../api/src/mcp/images';
+import { formatToolContent } from '../../../api/src/mcp/parsers';
 import { tenantStorage } from '~/config/tenantContext';
 import { createMessageMethods } from './message';
 import { createFileMethods } from './file';
@@ -25,7 +31,6 @@ const integration = root && python ? describe : describe.skip;
 const OWNER = 'a'.repeat(24);
 const GROUP = 'c'.repeat(24);
 const READ_KEY = 'test-callback-' + 'l'.repeat(32);
-const WRITE_KEY = 'native-image-test-' + 'i'.repeat(32);
 const GATEWAY = 'test-gateway-' + 'g'.repeat(32);
 integration('foreground image generation with real MCP and native MongoDB attachments', () => {
   it('stores linked originals/displays, preserves the final attachment, deduplicates and leaves running jobs alone', async () => {
@@ -62,15 +67,8 @@ integration('foreground image generation with real MCP and native MongoDB attach
       .tiff()
       .toBuffer();
     await writeFile(join(directory, 'source.tiff'), source);
-    const imageImport = {
-      findPrincipalUser: async (id) =>
-        id === OWNER
-          ? {
-              id,
-            }
-          : null,
+    const imageStorage = {
       getMessage: messages.getMessage,
-      getStorageConfig: async () => storageConfig,
       findFileById: files.findFileById,
       attachMCPImage: messages.attachMCPImage,
       // Test storage adapter: actual temporary files and native File rows.
@@ -100,9 +98,6 @@ integration('foreground image generation with real MCP and native MongoDB attach
       resizeImageBuffer: async () => {
         throw new Error('preserveOriginal must bypass resizing');
       },
-      logger: {
-        error: jest.fn(),
-      },
     };
     const app = express();
     app.use(express.json());
@@ -114,7 +109,6 @@ integration('foreground image generation with real MCP and native MongoDB attach
             mcpAuthorization: {
               enabled: true,
               apiKeyEnv: 'TEST_READ_KEY',
-              imageImportApiKeyEnv: 'TEST_WRITE_KEY',
               groupCatalogPageSize: 100,
             },
           },
@@ -139,12 +133,10 @@ integration('foreground image generation with real MCP and native MongoDB attach
         runWithContext: (context, action) => tenantStorage.run(context, action),
         env: {
           TEST_READ_KEY: READ_KEY,
-          TEST_WRITE_KEY: WRITE_KEY,
         },
         logger: {
           error: jest.fn(),
         },
-        imageImport,
       }),
     );
     const server = app.listen(0, '127.0.0.1');
@@ -199,25 +191,25 @@ integration('foreground image generation with real MCP and native MongoDB attach
           },
         }),
       );
+      expect(
+        (await fetch(`http://127.0.0.1:${nativePort}/api/internal/mcp/images`, { method: 'POST' }))
+          .status,
+      ).toBe(404);
       const invokeTool = async (_manager, invocation) => {
         const result = await client.callTool({
           name: 'generate_image',
           arguments: invocation.toolArguments,
-          _meta: {
-            'librechat/image': invocation.imageContext?.(),
-          },
+          _meta: invocation.requestMeta?.(),
         });
-        return [JSON.stringify(result.structuredContent), undefined];
+        return formatMCPImageJobResult(result) ?? formatToolContent(result, 'openai');
       };
       const call = createMCPImageInvoker({
-        enabled: true,
-        toolName: 'generate_image',
         invokeTool,
         deps: {
           saveMessage: messages.saveMessage,
           getConvo: async () => conversation,
           getAppConfig: async () => storageConfig,
-          findFileById: files.findFileById,
+          saveImage: createMCPImageStorage(imageStorage),
         },
       });
       const manager = {

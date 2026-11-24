@@ -889,11 +889,8 @@ describe('MCPManager', () => {
       const manager = new MCPManager();
       const connection = createConnection();
       jest.spyOn(manager, 'getConnection').mockResolvedValue(connection);
-      const imageContext = jest.fn(() => ({
-        conversation_id: 'trusted-thread',
-        message_id: 'trusted-answer',
-        call_id: 'trusted-call',
-        new_intent: true,
+      const requestMeta = jest.fn(() => ({
+        'librechat/call': { call_id: 'trusted-call', new_intent: true },
       }));
       await manager.callTool({
         user: mockUser,
@@ -901,18 +898,18 @@ describe('MCPManager', () => {
         serverConfig,
         toolName: 'generate_image',
         toolArguments: { prompt: 'Qwen prompt' },
-        imageContext,
+        requestMeta,
         provider: 'openai',
         flowManager: mockFlowManager,
       });
-      expect(imageContext).toHaveBeenCalledTimes(1);
+      expect(requestMeta).toHaveBeenCalledTimes(1);
       expect(connection.client.request).toHaveBeenCalledWith(
         {
           method: 'tools/call',
           params: {
             name: 'generate_image',
             arguments: { prompt: 'Qwen prompt' },
-            _meta: { 'librechat/image': imageContext.mock.results[0].value },
+            _meta: requestMeta.mock.results[0].value,
           },
         },
         expect.anything(),

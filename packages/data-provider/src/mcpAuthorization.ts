@@ -10,11 +10,12 @@ export const mcpAuthorizationConfigSchema = z
       .default('MCP_AUTHORIZATION_API_KEY'),
     /** Default and maximum requested catalog page size; hard safety ceiling: 500. */
     groupCatalogPageSize: z.number().int().min(1).max(500).default(100),
-    /** Pins the service credential to one LibreChat tenant; absent means tenantless users. */
+    /** Legacy YAML is accepted during upgrades. MCP image results are stored by the host. */
     imageImportApiKeyEnv: z
       .string()
       .regex(/^[A-Z][A-Z0-9_]{0,127}$/)
       .optional(),
+    /** Pins the service credential to one LibreChat tenant; absent means tenantless users. */
     tenantId: z
       .string()
       .trim()

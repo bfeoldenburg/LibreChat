@@ -1,216 +1,181 @@
 import sharp from 'sharp';
-import express from 'express';
-import request from 'supertest';
 import { Readable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import type { AppConfig } from '@librechat/data-schemas';
-import type { ImageImportDependencies } from './images';
-import { createMCPMembershipRouter } from './membership';
+import type { ImageStorageDependencies } from './images';
+import { createMCPImageStorage } from './images';
 
 const OWNER = 'a'.repeat(24);
-const OTHER = 'b'.repeat(24);
-const CONVO = 'conversation';
-const MESSAGE = 'result';
-const READ_KEY = 'membership-only-test-key-12345678901234';
-const WRITE_KEY = 'storage-only-test-key-1234567890123456';
-
 function harness(preserveOriginal: boolean) {
-  type File = NonNullable<Awaited<ReturnType<ImageImportDependencies['findFileById']>>>;
-  type Message = NonNullable<Awaited<ReturnType<ImageImportDependencies['getMessage']>>>;
+  type File = NonNullable<Awaited<ReturnType<ImageStorageDependencies['findFileById']>>>;
+  type Message = NonNullable<Awaited<ReturnType<ImageStorageDependencies['getMessage']>>>;
   const files = new Map<string, File>();
   const buffers = new Map<string, Buffer>();
-  const message: Message = { conversationId: CONVO, isCreatedByUser: false, files: [] };
-  const savePreparedImage: ImageImportDependencies['savePreparedImage'] = async (
-    image,
-    options,
-  ) => {
-    const { file_id, association, req, context, filename } = options;
-    if (filename === 'image-display' && !state.saveDisplay) {
-      throw new Error('test storage failure');
-    }
-    const file: File = {
-      ...association,
-      context,
-      file_id,
-      user: req.user.id,
-      tenantId: req.user.tenantId,
-      filename,
-      filepath: '/images/' + req.user.id + '/' + file_id,
-      width: image.width,
-      height: image.height,
-      source: 'local',
-      type: image.type ?? 'image/png',
-      bytes: image.bytes,
-    };
-    files.set(file_id, file);
-    buffers.set(file_id, image.buffer);
-    return file;
-  };
-  const attachMCPImage: ImageImportDependencies['attachMCPImage'] = async (target, image) => {
-    expect(target).toEqual({ userId: OWNER, conversationId: CONVO, messageId: MESSAGE });
-    if (!state.attach) return false;
-    message.files?.push(image);
-    return true;
-  };
-  const config = { enabled: true, imageImportApiKeyEnv: 'TEST_IMAGE_KEY' };
-  const state = {
-    attach: true,
-    saveDisplay: true,
-    files,
-    buffers,
-    message,
-    fileId: randomUUID(),
-    config,
-  };
-  const app = express();
-  app.use(express.json({ limit: '3mb' }));
-  app.use(
-    '/api/internal/mcp',
-    createMCPMembershipRouter({
-      getAppConfig: async () => ({
-        config: {
-          mcpAuthorization: {
-            ...config,
-            apiKeyEnv: 'MCP_AUTHORIZATION_API_KEY',
-            groupCatalogPageSize: 100,
-          },
-        },
-      }),
-      getMCPGroupMembership: async () => null,
-      getMCPGroupCatalog: async () => ({ tenantId: null, groups: [], nextCursor: null }),
-      runWithContext: (_context, action) => action(),
-      env: { MCP_AUTHORIZATION_API_KEY: READ_KEY, TEST_IMAGE_KEY: WRITE_KEY },
-      logger: { error: jest.fn() },
-      imageImport: {
-        findPrincipalUser: async (id) => ({ id }),
-        getMessage: async ({ user, messageId }) =>
-          user === OWNER && messageId === MESSAGE ? message : null,
-        getStorageConfig: async () =>
-          ({ fileConfig: { imageGeneration: { preserveOriginal } } }) as AppConfig,
-        findFileById: async (id) => files.get(id) ?? null,
-        attachMCPImage,
-        savePreparedImage,
-        readStoredImage: async (_req, file) => Readable.from([buffers.get(file.file_id)]),
-        resizeImageBuffer: async (buffer) => {
-          const output = await sharp(buffer)
-            .rotate()
-            .resize(8)
-            .png()
-            .toBuffer({ resolveWithObject: true });
-          return {
-            buffer: output.data,
-            bytes: output.data.length,
-            type: 'image/png',
-            width: output.info.width,
-            height: output.info.height,
-          };
-        },
-        logger: { error: jest.fn() },
-      },
-    }),
-  );
-  return {
-    ...state,
-    setSaveDisplay: (value: boolean) => {
-      state.saveDisplay = value;
+  const message: Message = { conversationId: 'conversation', isCreatedByUser: false, files: [] };
+  const state = { attach: true, saveDisplay: true, messageAvailable: true };
+  const config = { fileConfig: { imageGeneration: { preserveOriginal } } } as AppConfig;
+  const deps: ImageStorageDependencies = {
+    getMessage: async ({ user, messageId }) =>
+      state.messageAvailable && user === OWNER && messageId === 'result' ? message : null,
+    findFileById: async (id) => files.get(id) ?? null,
+    attachMCPImage: async (_target, image) => {
+      if (!state.attach) return false;
+      message.files?.push(image);
+      return true;
     },
-    setAttach: (value: boolean) => {
-      state.attach = value;
+    savePreparedImage: async (image, options) => {
+      const { file_id, association, req, context, filename } = options;
+      if (filename === 'image-display' && !state.saveDisplay)
+        throw new Error('test storage failure');
+      const file: File = {
+        ...association,
+        context,
+        file_id,
+        user: req.user.id,
+        tenantId: req.user.tenantId,
+        filename,
+        filepath: '/images/' + file_id,
+        width: image.width,
+        height: image.height,
+        source: 'local',
+        type: image.type ?? 'image/png',
+        bytes: image.bytes,
+      };
+      files.set(file_id, file);
+      buffers.set(file_id, image.buffer);
+      return file;
     },
-    post: (input: Buffer, mime: string, key = WRITE_KEY, user = OWNER, conversation = CONVO) =>
-      request(app)
-        .post('/api/internal/mcp/images')
-        .set('Authorization', 'Bearer ' + key)
-        .set('Content-Type', 'application/octet-stream')
-        .set('X-LibreChat-User-ID', user)
-        .set('X-LibreChat-Conversation-ID', conversation)
-        .set('X-LibreChat-Message-ID', MESSAGE)
-        .set('X-LibreChat-File-ID', state.fileId)
-        .set('X-Image-Mime-Type', mime)
-        .send(input),
+    readStoredImage: async (_req, file) => Readable.from([buffers.get(file.file_id)]),
+    resizeImageBuffer: async (buffer) => {
+      const { data, info } = await sharp(buffer)
+        .rotate()
+        .resize(8)
+        .png()
+        .toBuffer({ resolveWithObject: true });
+      return {
+        buffer: data,
+        bytes: data.length,
+        type: 'image/png',
+        width: info.width,
+        height: info.height,
+      };
+    },
   };
+  const store = createMCPImageStorage(deps);
+  const fileId = randomUUID();
+  const save = (input: Buffer, mime = 'image/png', userId = OWNER) =>
+    store({
+      user: { id: userId },
+      config,
+      conversationId: 'conversation',
+      messageId: 'result',
+      fileId,
+      dataUrl: `data:${mime};base64,${input.toString('base64')}`,
+    });
+  return { files, buffers, message, state, save, fileId, store, config };
 }
+const pixels = () =>
+  sharp({ create: { width: 20, height: 12, channels: 3, background: { r: 80, g: 40, b: 20 } } });
 
-function pixels() {
-  return sharp({ create: { width: 20, height: 12, channels: 3, background: 'red' } });
-}
-
-it('saves the original bytes once and associates the native image with the real result', async () => {
+it('preserves a web-capable original unchanged and stores only one native file', async () => {
   const h = harness(true);
   const input = await pixels().png().toBuffer();
-  const result = await h.post(input, 'image/png').expect(200);
-  expect(result.body).toEqual({
-    delivery_status: 'stored',
-    file_id: h.fileId,
-    display_file_id: h.fileId,
-  });
+  const display = await h.save(input);
+  expect(display.file_id).toBe(h.fileId);
   expect(h.buffers.get(h.fileId)).toEqual(input);
-  expect(h.files.get(h.fileId)).toMatchObject({
-    user: OWNER,
-    conversationId: CONVO,
-    messageId: MESSAGE,
-    bytes: input.length,
-  });
-  await h.post(input, 'image/png').expect(200);
   expect(h.files.size).toBe(1);
-  expect(h.message.files).toEqual([expect.objectContaining({ file_id: h.fileId })]);
+  expect(h.message.files).toEqual([display]);
+  expect(display.metadata?.imageOriginalFileId).toBeUndefined();
+  expect(await h.save(input)).toEqual(display);
+  expect(h.files.size).toBe(1);
 });
 
-it.each([false, true])('keeps a distinct linked display (TIFF fallback %s)', async (tiff) => {
-  const h = harness(tiff);
-  const input = await (
-    tiff ? pixels().tiff() : pixels().withMetadata({ orientation: 6 }).jpeg()
-  ).toBuffer();
-  const response = await h.post(input, tiff ? 'image/tiff' : 'image/jpeg').expect(200);
-  const id: string = response.body.display_file_id;
-  expect(id).not.toBe(h.fileId);
+it.each(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])(
+  'does not resize or convert %s with preserveOriginal',
+  async (mime) => {
+    const format = mime.slice(6) as 'png' | 'jpeg' | 'webp' | 'gif';
+    const h = harness(true);
+    const input = await pixels().toFormat(format).toBuffer();
+    const display = await h.save(input, mime);
+    expect(display.type).toBe(mime);
+    expect(h.buffers.get(display.file_id)).toEqual(input);
+    expect(h.files.size).toBe(1);
+  },
+);
+
+it('keeps an unmodified TIFF and a linked browser-capable PNG with preserveOriginal', async () => {
+  const h = harness(true);
+  const input = await pixels().tiff().toBuffer();
+  const display = await h.save(input, 'image/tiff');
+  expect(display.file_id).not.toBe(h.fileId);
   expect(h.buffers.get(h.fileId)).toEqual(input);
-  expect(h.buffers.get(id)).not.toEqual(input);
-  expect(h.files.get(h.fileId)?.metadata?.imageDisplayFileId).toBe(id);
-  expect(h.files.get(id)).toMatchObject({
-    user: OWNER,
-    conversationId: CONVO,
-    messageId: MESSAGE,
-    type: 'image/png',
-    metadata: { imageOriginalFileId: h.fileId },
-  });
-  expect(h.message.files).toEqual([expect.objectContaining({ file_id: id })]);
+  expect((await sharp(h.buffers.get(display.file_id)).metadata()).format).toBe('png');
+  expect(h.files.get(h.fileId)?.metadata?.imageDisplayFileId).toBe(display.file_id);
+  expect(display.metadata?.imageOriginalFileId).toBe(h.fileId);
+  expect(h.message.files).toEqual([display]);
+  expect(h.files.size).toBe(2);
 });
 
-it('rejects read credentials, a foreign owner, a different chat and an invalid image', async () => {
+it('retains the original when configured display processing changes the bytes', async () => {
+  const h = harness(false);
+  const input = await pixels().withMetadata({ orientation: 6 }).jpeg().toBuffer();
+  const display = await h.save(input, 'image/jpeg');
+  expect(h.buffers.get(h.fileId)).toEqual(input);
+  expect(display.file_id).not.toBe(h.fileId);
+  expect(display.type).toBe('image/png');
+  expect(h.files.size).toBe(2);
+});
+
+it('rejects unavailable messages, foreign users and invalid raster data before storage', async () => {
   const h = harness(true);
   const input = await pixels().png().toBuffer();
-  await h.post(input, 'image/png', READ_KEY).expect(401);
-  await h.post(input, 'image/png', WRITE_KEY, OTHER).expect(404);
-  await h.post(input, 'image/png', WRITE_KEY, OWNER, 'other-chat').expect(404);
-  await h.post(input, 'image/jpeg').expect(422);
+  h.state.messageAvailable = false;
+  await expect(h.save(input)).rejects.toThrow('image_target_unavailable');
+  h.state.messageAvailable = true;
+  await expect(h.save(input, 'image/png', 'b'.repeat(24))).rejects.toThrow(
+    'image_target_unavailable',
+  );
+  await expect(h.save(input, 'image/jpeg')).rejects.toThrow('image_content_invalid');
+  await expect(h.save(Buffer.from('not an image'))).rejects.toThrow('image_content_invalid');
   expect(h.files.size).toBe(0);
 });
 
-it('acknowledges only after attachment and reuses saved files on retry', async () => {
-  const h = harness(false);
+it('requires the native attachment update before confirming and reuses files on retry', async () => {
+  const h = harness(true);
   const input = await pixels().png().toBuffer();
-  h.setAttach(false);
-  await h.post(input, 'image/png').expect(409);
+  h.state.attach = false;
+  await expect(h.save(input)).rejects.toThrow('image_target_unavailable');
   expect(h.message.files).toHaveLength(0);
-  h.setAttach(true);
-  await h.post(input, 'image/png').expect(200);
-  expect(h.files.size).toBe(2);
+  h.state.attach = true;
+  await h.save(input);
   expect(h.message.files).toHaveLength(1);
-  h.files.delete(h.fileId);
-  await h.post(input, 'image/png').expect(409);
-  expect(h.files.has(h.fileId)).toBe(false);
+  expect(h.files.size).toBe(1);
 });
 
-it('builds a missing display from the previously stored original when the source changed', async () => {
+it('derives a missing display from the stored original after a partial failure', async () => {
   const h = harness(false);
-  const input = await pixels().png().toBuffer();
-  h.setSaveDisplay(false);
-  await h.post(input, 'image/png').expect(503);
-  h.setSaveDisplay(true);
+  const input = await pixels().jpeg().toBuffer();
+  h.state.saveDisplay = false;
+  await expect(h.save(input, 'image/jpeg')).rejects.toThrow('test storage failure');
+  h.state.saveDisplay = true;
   const replacement = await pixels().negate().png().toBuffer();
-  const result = await h.post(replacement, 'image/png').expect(200);
-  const display = h.buffers.get(result.body.display_file_id);
-  expect(display).toEqual(await sharp(input).rotate().resize(8).png().toBuffer());
+  const display = await h.save(replacement);
+  expect(h.buffers.get(display.file_id)).toEqual(
+    await sharp(input).rotate().resize(8).png().toBuffer(),
+  );
   expect(h.buffers.get(h.fileId)).toEqual(input);
+});
+
+it('coalesces simultaneous host saves and never recreates an already attached deleted image', async () => {
+  const h = harness(true);
+  const input = await pixels().tiff().toBuffer();
+  const [first, second] = await Promise.all([
+    h.save(input, 'image/tiff'),
+    h.save(input, 'image/tiff'),
+  ]);
+  expect(first).toEqual(second);
+  expect(h.files.size).toBe(2);
+  expect(h.message.files).toHaveLength(1);
+  h.files.delete(first.file_id);
+  await expect(h.save(input, 'image/tiff')).rejects.toThrow('image_file_unavailable');
 });

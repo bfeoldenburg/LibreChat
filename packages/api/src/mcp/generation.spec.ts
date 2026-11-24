@@ -1,125 +1,156 @@
-import type { IUser } from '@librechat/data-schemas';
+import type { IUser, AppConfig } from '@librechat/data-schemas';
+import type { ImageFile } from 'librechat-data-provider';
 import type { AgentMCPToolInvoker } from './agent';
-import { createMCPImageInvoker } from './generation';
+import type { ImageStorageInput } from './images';
+import { createMCPImageInvoker, formatMCPImageJobResult } from './generation';
+import { isMCPToolResultError, markMCPToolResultError } from './status';
 
-const userId = 'a'.repeat(24);
 const conversationId = '11111111-1111-4111-8111-111111111111';
 const context = { conversationId, messageId: 'trusted-answer', toolCallId: 'qwen-call' };
-
-function harness() {
+const dataUrl = 'data:image/png;base64,c3ludGhldGlj';
+function harness(image = true) {
   const saved = { conversationId, isCreatedByUser: false, isUserSubmitted: false };
-  const saveMessage = jest.fn(async (): Promise<typeof saved | undefined> => saved);
-  const getConvo = jest.fn(async () => ({}));
+  const deps = {
+    saveMessage: jest.fn(async (): Promise<typeof saved | undefined> => saved),
+    getConvo: jest.fn(async () => ({})),
+    getAppConfig: jest.fn(async () => ({}) as AppConfig),
+    saveImage: jest.fn(
+      async (_input: ImageStorageInput) => ({ file_id: 'native-display' }) as ImageFile,
+    ),
+  };
   const invokeTool = jest.fn<ReturnType<AgentMCPToolInvoker>, Parameters<AgentMCPToolInvoker>>(
     async (_manager, input) => {
-      input.imageContext?.();
-      return ['{"status":"queued"}', undefined];
+      input.requestMeta?.();
+      return [
+        JSON.stringify({
+          status: image ? 'image_ready' : 'queued',
+          delivery_status: image ? 'pending' : 'not_started',
+          job_reference: 'f'.repeat(32),
+        }),
+        image ? { content: [{ type: 'image_url', image_url: { url: dataUrl } }] } : undefined,
+      ];
     },
   );
-  const deps = {
-    saveMessage,
-    getConvo,
-    getAppConfig: jest.fn(async () => undefined),
-    findFileById: jest.fn(async () => null),
-  };
-  const manager = { callTool: jest.fn() };
   const invocation: Parameters<AgentMCPToolInvoker>[1] = {
-    user: { id: userId } as IUser,
+    user: { id: 'a'.repeat(24) } as IUser,
     serverName: 'bfe-medien',
     toolName: 'generate_image',
     provider: 'openai',
     toolArguments: { prompt: 'Qwen prompt', message_id: 'forged' },
     flowManager: {} as Parameters<AgentMCPToolInvoker>[1]['flowManager'],
   };
-  const call = createMCPImageInvoker({
-    enabled: true,
-    toolName: 'generate_image',
-    invokeTool,
+  return {
     deps,
-  });
-  return { call, deps, manager, invocation, invokeTool, saved };
+    invocation,
+    invokeTool,
+    manager: { callTool: jest.fn() },
+    saved,
+    call: createMCPImageInvoker({ invokeTool, deps }),
+  };
 }
-
-it('requires trusted server context before invoking the MCP', async () => {
-  const h = harness();
-  await expect(h.call(h.manager, h.invocation, {})).rejects.toThrow('image_context_unavailable');
-  expect(h.invokeTool).not.toHaveBeenCalled();
-});
-
-it('refuses an unpersisted result message', async () => {
-  const h = harness();
-  h.deps.saveMessage.mockResolvedValueOnce(undefined);
-  await expect(h.call(h.manager, h.invocation, context)).rejects.toThrow(
-    'image_context_unavailable',
-  );
-  expect(h.invokeTool).not.toHaveBeenCalled();
-});
-
-it('rejects a user-authored result row and a different conversation', async () => {
-  const h = harness();
-  h.deps.saveMessage.mockResolvedValueOnce({ ...h.saved, isCreatedByUser: true });
-  await expect(h.call(h.manager, h.invocation, context)).rejects.toThrow(
-    'image_context_unavailable',
-  );
-  h.deps.saveMessage.mockResolvedValueOnce({ ...h.saved, conversationId: 'another' });
-  await expect(h.call(h.manager, h.invocation, context)).rejects.toThrow(
-    'image_context_unavailable',
-  );
-  expect(h.invokeTool).not.toHaveBeenCalled();
-});
-
-it('marks subsequent transport attempts as retries and ignores model target IDs', async () => {
-  const h = harness();
-  const metadata: Record<string, string | boolean>[] = [];
+it('provides only an opaque request identity and marks transport retries', async () => {
+  const h = harness(false);
+  const metadata: Record<string, unknown>[] = [];
   h.invokeTool.mockImplementation(async (_manager, input) => {
-    metadata.push(input.imageContext!());
-    throw new Error('synthetic transport loss');
+    metadata.push(input.requestMeta!());
+    throw new Error('transport loss');
   });
-  await expect(h.call(h.manager, h.invocation, context)).rejects.toThrow(
-    'synthetic transport loss',
-  );
-  await expect(h.call(h.manager, h.invocation, context)).rejects.toThrow(
-    'synthetic transport loss',
-  );
-  expect(metadata.map((item) => item.new_intent)).toEqual([true, false]);
-  expect(metadata[0]).toEqual({
-    conversation_id: conversationId,
-    message_id: context.messageId,
-    call_id: expect.stringMatching(/^[0-9a-f]{64}$/),
-    new_intent: true,
-  });
-  expect(metadata[1].call_id).toBe(metadata[0].call_id);
-  expect(h.deps.saveMessage).toHaveBeenCalledWith(
-    expect.anything(),
-    expect.objectContaining({
-      messageId: context.messageId,
-      conversationId,
-      isCreatedByUser: false,
-    }),
-    { insertOnly: true },
-  );
+  await expect(h.call(h.manager, h.invocation, context)).rejects.toThrow('transport loss');
+  await expect(h.call(h.manager, h.invocation, context)).rejects.toThrow('transport loss');
+  const first = metadata[0]['librechat/call'];
+  expect(first).toEqual({ call_id: expect.stringMatching(/^[0-9a-f]{64}$/), new_intent: true });
+  expect(metadata[1]['librechat/call']).toEqual({ ...(first as object), new_intent: false });
+  expect(JSON.stringify(metadata)).not.toContain(conversationId);
+  expect(h.deps.saveMessage).not.toHaveBeenCalled();
 });
-
-it('does not turn an unverified receipt into a native attachment', async () => {
-  const h = harness();
-  h.invokeTool.mockResolvedValue([
-    '{"delivery_status":"stored","file_id":"bad","display_file_id":"bad"}',
-    undefined,
-  ]);
+it('leaves catalog and other non-image results on the existing path without database reads', async () => {
+  const h = harness(false);
   const result = await h.call(h.manager, h.invocation, context);
   expect(result[1]).toBeUndefined();
-  expect(h.deps.findFileById).not.toHaveBeenCalled();
+  expect(h.deps.getConvo).not.toHaveBeenCalled();
+  expect(h.deps.getAppConfig).not.toHaveBeenCalled();
+});
+it('saves the existing result message before local image storage and reports stored afterward', async () => {
+  const h = harness();
+  h.deps.saveImage.mockImplementation(async (input) => {
+    expect(h.deps.saveMessage).toHaveBeenCalledTimes(1);
+    expect(input).toMatchObject({ conversationId, messageId: context.messageId, dataUrl });
+    return { file_id: input.fileId } as ImageFile;
+  });
+  const first = await h.call(h.manager, h.invocation, context);
+  expect(JSON.parse(first[0]).delivery_status).toBe('stored');
+  expect(first[1]?.content).toBeUndefined();
+  expect(first[1]?.nativeImageFiles).toHaveLength(1);
+  await h.call(h.manager, h.invocation, context);
+  expect(h.deps.saveImage.mock.calls[0][0].fileId).toBe(h.deps.saveImage.mock.calls[1][0].fileId);
+});
+it('does not save for missing, user-authored or conflicting result messages', async () => {
+  const h = harness();
+  h.deps.saveMessage.mockResolvedValueOnce(undefined);
+  const missing = await h.call(h.manager, h.invocation, context);
+  expect(isMCPToolResultError(missing)).toBe(true);
+  h.deps.saveMessage.mockResolvedValueOnce({ ...h.saved, isCreatedByUser: true });
+  const authored = await h.call(h.manager, h.invocation, context);
+  expect(isMCPToolResultError(authored)).toBe(true);
+  h.deps.saveMessage.mockResolvedValueOnce({ ...h.saved, conversationId: 'another' });
+  await h.call(h.manager, h.invocation, context);
+  expect(h.deps.saveImage).not.toHaveBeenCalled();
+});
+it('returns a storage failure with the existing job reference and no image bytes', async () => {
+  const h = harness();
+  h.deps.saveImage.mockRejectedValue(new Error('private failure /internal/path secret'));
+  const result = await h.call(h.manager, h.invocation, context);
+  expect(isMCPToolResultError(result)).toBe(true);
+  expect(JSON.parse(result[0])).toMatchObject({
+    status: 'image_storage_failed',
+    delivery_status: 'failed',
+    job_reference: 'f'.repeat(32),
+  });
+  expect(JSON.stringify(result)).not.toContain('private failure');
+  expect(JSON.stringify(result)).not.toContain('base64');
+});
+it('preserves MCP error status without attempting image storage', async () => {
+  const h = harness();
+  h.invokeTool.mockResolvedValue(
+    markMCPToolResultError(
+      ['tool error', { content: [{ type: 'image_url', image_url: { url: dataUrl } }] }],
+      true,
+    ),
+  );
+  const result = await h.call(h.manager, h.invocation, context);
+  expect(isMCPToolResultError(result)).toBe(true);
+  expect(h.deps.saveMessage).not.toHaveBeenCalled();
+  expect(h.deps.saveImage).not.toHaveBeenCalled();
 });
 
-it('keeps other tools and disabled integrations on the existing invocation path', async () => {
+it('isolates native job images from model content and passes unrelated image results through', async () => {
   const h = harness();
-  const call = createMCPImageInvoker({
-    enabled: false,
-    toolName: 'generate_image',
-    invokeTool: h.invokeTool,
-    deps: h.deps,
+  const unrelated = [
+    'a general image tool result',
+    { content: [{ type: 'image_url', image_url: { url: dataUrl } }] },
+  ] as const;
+  h.invokeTool.mockResolvedValue([unrelated[0], { content: [...unrelated[1].content] }]);
+  expect(await h.call(h.manager, h.invocation, context)).toEqual(unrelated);
+  expect(h.deps.saveImage).not.toHaveBeenCalled();
+
+  const formatted = formatMCPImageJobResult({
+    structuredContent: {
+      status: 'image_ready',
+      delivery_status: 'pending',
+      job_reference: 'f'.repeat(32),
+      ignored: 'private',
+    },
+    content: [{ type: 'image', mimeType: 'image/png', data: 'c3ludGhldGlj' }],
   });
-  await call(h.manager, h.invocation, {});
-  expect(h.deps.saveMessage).not.toHaveBeenCalled();
-  expect(h.invokeTool).toHaveBeenCalledWith(h.manager, h.invocation);
+  expect(formatted?.[0]).not.toMatch(/base64|private/);
+  expect(formatted?.[1]?.content).toEqual(unrelated[1].content);
+  const missing = formatMCPImageJobResult({
+    structuredContent: {
+      status: 'image_ready',
+      delivery_status: 'pending',
+      job_reference: 'f'.repeat(32),
+    },
+    content: [],
+  });
+  expect(missing && isMCPToolResultError(missing)).toBe(true);
 });

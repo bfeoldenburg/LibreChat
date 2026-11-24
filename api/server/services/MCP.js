@@ -25,6 +25,8 @@ const {
   processMCPEnv,
   createAgentMCPTool,
   createMCPImageInvoker,
+  createMCPImageStorage,
+  resolveDownloadPath,
   preProcessGraphTokens,
   createMCPReauthenticationPrompt,
   createMCPInitializationOAuthPrompts,
@@ -76,6 +78,19 @@ const {
   getMCPManager,
 } = require('~/config');
 const db = require('~/models');
+const { resizeImageBuffer } = require('~/server/services/Files/images/resize');
+const saveMCPImage = createMCPImageStorage({
+  getMessage: db.getMessage,
+  findFileById: db.findFileById,
+  attachMCPImage: db.attachMCPImage,
+  savePreparedImage: (...args) =>
+    require('~/server/services/Files/process').savePreparedImage(...args),
+  readStoredImage: (req, file) =>
+    require('~/server/services/Files/strategies')
+      .getStrategyFunctions(file.source)
+      .getDownloadStream(req, resolveDownloadPath(file)),
+  resizeImageBuffer,
+});
 const { findToken, createToken, updateToken, deleteTokens, findPluginAuthsByKeys } = db;
 const { getGraphApiToken } = require('./GraphTokenService');
 const { exchangeOboToken } = require('./OboTokenService');
@@ -1204,7 +1219,6 @@ async function createMCPToolImpl({
 
   return createToolInstance({
     invokeTool,
-    nativeImageGeneration: serverConfig?.nativeImageGeneration,
     scheduledBearerInvocation: bindScheduledMCPBearerInvocation(
       requestScopedConnections,
       agentId,
@@ -1245,7 +1259,6 @@ async function createMCPToolImpl({
 
 function createToolInstance({
   invokeTool,
-  nativeImageGeneration,
   scheduledBearerInvocation,
   scheduledMCPInvocation,
   res,
@@ -1271,15 +1284,12 @@ function createToolInstance({
   recoveryPolicy,
 }) {
   const invokeImageTool = createMCPImageInvoker({
-    enabled: nativeImageGeneration,
-    serverConfig: capturedServerConfig,
     invokeTool,
-    toolName: serverToolName,
     deps: {
       saveMessage: db.saveMessage,
       getConvo: db.getConvo,
       getAppConfig,
-      findFileById: db.findFileById,
+      saveImage: saveMCPImage,
     },
   });
   /** @type {LCTool} */

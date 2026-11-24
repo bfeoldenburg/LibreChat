@@ -1,20 +1,15 @@
 import sharp from 'sharp';
-import { raw } from 'express';
 import { randomUUID } from 'node:crypto';
 import { EModelEndpoint, FileContext } from 'librechat-data-provider';
-import type { ImageFile, MCPAuthorizationConfig } from 'librechat-data-provider';
 import type { AppConfig, IMessage } from '@librechat/data-schemas';
-import type { Request, Response } from 'express';
+import type { ImageFile } from 'librechat-data-provider';
 import type { Readable } from 'node:stream';
 import type { GeneratedImage, GeneratedImageDependencies } from '~/files/generation';
 import { prepareGeneratedImage } from '~/files/generation';
-import { getSafeErrorMetadata } from '~/utils/errors';
 
 const MAX_IMAGE_BYTES = 16_777_216;
 const rasterTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/tiff']);
-const identifier = /^[A-Za-z0-9_-]{1,128}$/;
 const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
-const readRaw = raw({ type: 'application/octet-stream', limit: MAX_IMAGE_BYTES, inflate: false });
 
 type Owner = { id: string; role?: string; idOnTheSource?: string | null; tenantId?: string };
 type ImageLinks = { imageOriginalFileId?: string; imageDisplayFileId?: string };
@@ -46,8 +41,7 @@ type StorageRequest = {
   fileRetentionSource: { isTemporary?: boolean; expiredAt?: Date | null };
 };
 
-export interface ImageImportDependencies {
-  findPrincipalUser: (id: string) => Promise<Owner | null>;
+export interface ImageStorageDependencies {
   getMessage: (query: {
     user: string;
     messageId: string;
@@ -61,7 +55,6 @@ export interface ImageImportDependencies {
     | 'expiredAt'
     | 'files'
   > | null>;
-  getStorageConfig: (user: Owner) => Promise<AppConfig>;
   findFileById: (id: string) => Promise<ImportFile | null>;
   attachMCPImage: (target: Target, image: ImageFile, originalFileId: string) => Promise<boolean>;
   savePreparedImage: (
@@ -80,40 +73,13 @@ export interface ImageImportDependencies {
   ) => Promise<ImportFile | null>;
   readStoredImage: (req: StorageRequest, file: ImportFile) => Promise<Readable>;
   resizeImageBuffer: GeneratedImageDependencies['resizeImageBuffer'];
-  logger: Pick<Console, 'error'>;
-}
-
-class ImportError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-  ) {
-    super(code);
-  }
-}
-
-async function readImage(req: Request, res: Response): Promise<Buffer> {
-  if (!req.is('application/octet-stream')) throw new ImportError(415, 'image_type_invalid');
-  await new Promise<void>((resolve, reject) => {
-    readRaw(req, res, (error?: { status?: number }) => {
-      if (error) {
-        reject(new ImportError(error.status === 413 ? 413 : 400, 'image_body_invalid'));
-      } else {
-        resolve();
-      }
-    });
-  });
-  if (!Buffer.isBuffer(req.body) || !req.body.length) {
-    throw new ImportError(400, 'image_body_invalid');
-  }
-  return req.body;
 }
 
 async function prepare(
   input: Buffer,
   mime: string,
   config: AppConfig,
-  resizeImageBuffer: ImageImportDependencies['resizeImageBuffer'],
+  resizeImageBuffer: ImageStorageDependencies['resizeImageBuffer'],
 ) {
   const endpoint = EModelEndpoint.agents;
   const options = { endpoint, config: config.fileConfig?.imageGeneration };
@@ -144,7 +110,7 @@ async function prepare(
     const display = await prepareGeneratedImage(input, options, { resizeImageBuffer });
     return input.equals(display.buffer) ? { original } : { original, display };
   } catch {
-    throw new ImportError(422, 'image_content_invalid');
+    throw new Error('image_content_invalid');
   }
 }
 
@@ -159,7 +125,7 @@ function checkFile(file: ImportFile, target: Target, tenantId: string | undefine
     file.storageOperations?.deletionPending === true ||
     (file.expiredAt != null && file.expiredAt.getTime() <= Date.now())
   ) {
-    throw new ImportError(409, 'image_file_unavailable');
+    throw new Error('image_file_unavailable');
   }
   return file;
 }
@@ -212,7 +178,7 @@ function attachedDisplayId(files: unknown[] | undefined, originalId: string) {
   return undefined;
 }
 
-async function readOriginal(req: StorageRequest, file: ImportFile, deps: ImageImportDependencies) {
+async function readOriginal(req: StorageRequest, file: ImportFile, deps: ImageStorageDependencies) {
   const chunks: Buffer[] = [];
   let bytes = 0;
   const stream = await deps.readStoredImage(req, file);
@@ -231,17 +197,16 @@ async function store(
   fileId: string,
   mime: string,
   input: Buffer,
-  tenantId: string | undefined,
-  deps: ImageImportDependencies,
+  user: Owner,
+  config: AppConfig,
+  deps: ImageStorageDependencies,
 ) {
-  const [user, message, existing] = await Promise.all([
-    deps.findPrincipalUser(target.userId),
+  const tenantId = user.tenantId;
+  const [message, existing] = await Promise.all([
     deps.getMessage({ user: target.userId, messageId: target.messageId }),
     deps.findFileById(fileId),
   ]);
   if (
-    !user ||
-    (user.tenantId ?? null) !== (tenantId ?? null) ||
     !message ||
     (message.tenantId ?? null) !== (tenantId ?? null) ||
     message.conversationId !== target.conversationId ||
@@ -249,19 +214,18 @@ async function store(
     message.isUserSubmitted === true ||
     (message.expiredAt != null && message.expiredAt.getTime() <= Date.now())
   ) {
-    throw new ImportError(404, 'image_target_unavailable');
+    throw new Error('image_target_unavailable');
   }
 
   const displayId = attachedDisplayId(message.files, fileId);
   if (displayId) {
     const display = displayId === fileId ? existing : await deps.findFileById(displayId);
-    if (!existing || !display) throw new ImportError(409, 'image_file_unavailable');
+    if (!existing || !display) throw new Error('image_file_unavailable');
     checkFile(existing, target, tenantId);
     checkFile(display, target, tenantId);
-    return displayId;
+    return asMCPImageFile(display);
   }
 
-  const config = await deps.getStorageConfig(user);
   const req = {
     user,
     config,
@@ -295,7 +259,7 @@ async function store(
     if (preview) {
       checkFile(preview, target, tenantId);
       if (preview.metadata?.imageOriginalFileId !== fileId) {
-        throw new ImportError(409, 'image_file_unavailable');
+        throw new Error('image_file_unavailable');
       }
       displayFile = preview;
     } else {
@@ -311,7 +275,7 @@ async function store(
             deps.resizeImageBuffer,
           )
         ).display;
-      if (!display) throw new ImportError(409, 'image_file_unavailable');
+      if (!display) throw new Error('image_file_unavailable');
       const saved = await deps.savePreparedImage(display, {
         req,
         file_id: previewId,
@@ -324,57 +288,64 @@ async function store(
     }
   }
   if (!(await deps.attachMCPImage(target, asMCPImageFile(displayFile), fileId))) {
-    throw new ImportError(409, 'image_target_unavailable');
+    throw new Error('image_target_unavailable');
   }
-  return displayFile.file_id;
+  return asMCPImageFile(displayFile);
 }
 
-export function createMCPImageImport(
-  deps: ImageImportDependencies,
-  runWithContext: <T>(
-    context: { tenantId?: string; userId: string },
-    action: () => Promise<T>,
-  ) => Promise<T>,
-): (req: Request, res: Response, config: MCPAuthorizationConfig) => Promise<void> {
-  const active = new Set<string>();
-  return async (req, res, config) => {
-    const userId = req.get('X-LibreChat-User-ID') ?? '';
-    const conversationId = req.get('X-LibreChat-Conversation-ID') ?? '';
-    const messageId = req.get('X-LibreChat-Message-ID') ?? '';
-    const fileId = req.get('X-LibreChat-File-ID') ?? '';
-    const mime = req.get('X-Image-Mime-Type') ?? '';
-    if (
-      !/^[0-9a-f]{24}$/.test(userId) ||
-      !identifier.test(conversationId) ||
-      !identifier.test(messageId) ||
-      !uuid.test(fileId) ||
-      !rasterTypes.has(mime)
-    ) {
-      res.status(400).json({ error: { code: 'image_request_invalid' } });
-      return;
-    }
-    if (active.has(fileId)) {
-      res.status(409).json({ error: { code: 'image_import_in_progress' } });
-      return;
-    }
-    active.add(fileId);
-    try {
-      const data = await readImage(req, res);
-      const displayId = await runWithContext({ tenantId: config.tenantId, userId }, () =>
-        store({ userId, conversationId, messageId }, fileId, mime, data, config.tenantId, deps),
-      );
-      res
-        .status(200)
-        .json({ delivery_status: 'stored', file_id: fileId, display_file_id: displayId });
-    } catch (error) {
-      if (error instanceof ImportError) {
-        res.status(error.status).json({ error: { code: error.code } });
-        return;
+export interface ImageStorageInput {
+  user: Owner;
+  config: AppConfig;
+  conversationId: string;
+  messageId: string;
+  fileId: string;
+  dataUrl: string;
+}
+
+/** Store a regular MCP image result using only trusted, host-owned context. */
+export function createMCPImageStorage(
+  deps: ImageStorageDependencies,
+): (input: ImageStorageInput) => Promise<ImageFile> {
+  const active = new Map<string, Promise<ImageFile>>();
+  return async (input) => {
+    if (!uuid.test(input.fileId)) throw new Error('image_file_invalid');
+    const key = JSON.stringify([
+      input.user.id,
+      input.conversationId,
+      input.messageId,
+      input.fileId,
+    ]);
+    const pending = active.get(key);
+    if (pending) return pending;
+    const save = async (): Promise<ImageFile> => {
+      const match = /^data:(image\/[a-z]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(input.dataUrl);
+      if (
+        !match ||
+        !rasterTypes.has(match[1]) ||
+        match[2].length > 4 * Math.ceil(MAX_IMAGE_BYTES / 3)
+      ) {
+        throw new Error('image_content_invalid');
       }
-      deps.logger.error('[MCP image import] Storage failed', getSafeErrorMetadata(error));
-      res.status(503).json({ error: { code: 'image_import_failed' } });
+      const data = Buffer.from(match[2], 'base64');
+      if (!data.length || data.length > MAX_IMAGE_BYTES || data.toString('base64') !== match[2]) {
+        throw new Error('image_content_invalid');
+      }
+      return store(
+        { userId: input.user.id, conversationId: input.conversationId, messageId: input.messageId },
+        input.fileId,
+        match[1],
+        data,
+        input.user,
+        input.config,
+        deps,
+      );
+    };
+    const operation = save();
+    active.set(key, operation);
+    try {
+      return await operation;
     } finally {
-      active.delete(fileId);
+      active.delete(key);
     }
   };
 }

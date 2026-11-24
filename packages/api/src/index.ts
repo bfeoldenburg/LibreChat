@@ -52,6 +52,7 @@ export * from './mcp/assistants';
 export * from './mcp/request';
 export * from './mcp/agent';
 export * from './mcp/generation';
+export * from './mcp/images';
 export * from './mcp/reinitialize';
 export * from './mcp/icons';
 /* Utilities */
