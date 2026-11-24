@@ -164,7 +164,7 @@ function checkFile(file: ImportFile, target: Target, tenantId: string | undefine
   return file;
 }
 
-function asImageFile(file: ImportFile): ImageFile {
+export function asMCPImageFile(file: ImportFile): ImageFile {
   const image = {
     user: String(file.user),
     file_id: file.file_id,
@@ -180,9 +180,12 @@ function asImageFile(file: ImportFile): ImageFile {
     width: file.width ?? 0,
     height: file.height ?? 0,
     source: file.source as ImageFile['source'],
-    ...(file.metadata?.imageOriginalFileId && {
-      metadata: { imageOriginalFileId: file.metadata.imageOriginalFileId },
-    }),
+    metadata: {
+      mcpImage: true,
+      ...(file.metadata?.imageOriginalFileId && {
+        imageOriginalFileId: file.metadata.imageOriginalFileId,
+      }),
+    },
   };
   return image;
 }
@@ -320,7 +323,7 @@ async function store(
       displayFile = saved;
     }
   }
-  if (!(await deps.attachMCPImage(target, asImageFile(displayFile), fileId))) {
+  if (!(await deps.attachMCPImage(target, asMCPImageFile(displayFile), fileId))) {
     throw new ImportError(409, 'image_target_unavailable');
   }
   return displayFile.file_id;

@@ -24,6 +24,7 @@ const {
   sanitizeGeminiSchema,
   processMCPEnv,
   createAgentMCPTool,
+  createMCPImageInvoker,
   preProcessGraphTokens,
   createMCPReauthenticationPrompt,
   createMCPInitializationOAuthPrompts,
@@ -1203,6 +1204,7 @@ async function createMCPToolImpl({
 
   return createToolInstance({
     invokeTool,
+    nativeImageGeneration: serverConfig?.nativeImageGeneration,
     scheduledBearerInvocation: bindScheduledMCPBearerInvocation(
       requestScopedConnections,
       agentId,
@@ -1243,6 +1245,7 @@ async function createMCPToolImpl({
 
 function createToolInstance({
   invokeTool,
+  nativeImageGeneration,
   scheduledBearerInvocation,
   scheduledMCPInvocation,
   res,
@@ -1267,6 +1270,18 @@ function createToolInstance({
   unattended,
   recoveryPolicy,
 }) {
+  const invokeImageTool = createMCPImageInvoker({
+    enabled: nativeImageGeneration,
+    serverConfig: capturedServerConfig,
+    invokeTool,
+    toolName: serverToolName,
+    deps: {
+      saveMessage: db.saveMessage,
+      getConvo: db.getConvo,
+      getAppConfig,
+      findFileById: db.findFileById,
+    },
+  });
   /** @type {LCTool} */
   const { description, parameters } = toolDefinition;
   const isGoogle = capturedProvider === Providers.VERTEXAI || capturedProvider === Providers.GOOGLE;
@@ -1370,52 +1385,60 @@ function createToolInstance({
        * as the jwt-bearer assertion.
        */
       return await oauthPrompt.run(() =>
-        invokeTool(mcpManager, {
-          scheduledBearerInvocation,
-          scheduledMCPInvocation,
-          serverName,
-          serverConfig: capturedServerConfig,
-          /** The upstream server never sees stripped names — a key that dropped
-           *  a redundant server-name prefix calls the ORIGINAL tool. */
-          toolName: serverToolName,
-          provider,
-          toolArguments,
-          options: {
-            signal: derivedSignal,
+        invokeImageTool(
+          mcpManager,
+          {
+            scheduledBearerInvocation,
+            scheduledMCPInvocation,
+            serverName,
+            serverConfig: capturedServerConfig,
+            /** The upstream server never sees stripped names — a key that dropped
+             *  a redundant server-name prefix calls the ORIGINAL tool. */
+            toolName: serverToolName,
+            provider,
+            toolArguments,
+            options: {
+              signal: derivedSignal,
+            },
+            user: effectiveUser,
+            requestBody: config?.configurable?.requestBody ?? capturedRequestBody,
+            requestScopedConnections:
+              config?.configurable?.requestScopedConnections ?? capturedRequestScopedConnections,
+            customUserVars,
+            flowManager,
+            tokenMethods: {
+              findToken,
+              createToken,
+              updateToken,
+              deleteTokens,
+            },
+            onOAuthCredentialsChanging: (scope) =>
+              prepareMCPAuthorizationMutation(scope, {
+                invalidateRecoveryGeneration: invalidateCachedTools,
+                persistPublicationRetry: persistMCPAuthorizationFenceRetry,
+                clearPublicationRetry: clearMCPAuthorizationFenceRetry,
+                clearLocalRecovery: (userId, changedServerName) =>
+                  mcpManager.clearCatalogRecoveryState?.(userId, changedServerName),
+                retryDelaysMs: recoveryPolicy?.authorizationFenceRetryMs,
+                attemptTimeoutMs: recoveryPolicy?.authorizationFenceTimeoutMs,
+              }),
+            oauthStart,
+            oauthEnd: oauthPrompt.end,
+            unattended,
+            graphTokenResolver: getGraphApiToken,
+            oboTokenResolver: exchangeOboToken,
+            oboTrustChecker: createOboTrustChecker(),
+            upstreamTokenProvider: capturedUpstreamTokenProvider,
+            upstreamTokenProviderResolver: capturedUpstreamTokenProviderResolver,
+            oboIdentityContext: capturedOboIdentityContext,
+            mcpApps: capturedMCPApps,
           },
-          user: effectiveUser,
-          requestBody: config?.configurable?.requestBody ?? capturedRequestBody,
-          requestScopedConnections:
-            config?.configurable?.requestScopedConnections ?? capturedRequestScopedConnections,
-          customUserVars,
-          flowManager,
-          tokenMethods: {
-            findToken,
-            createToken,
-            updateToken,
-            deleteTokens,
+          {
+            conversationId: config?.metadata?.thread_id,
+            messageId: config?.metadata?.run_id,
+            toolCallId: toolCall.id,
           },
-          onOAuthCredentialsChanging: (scope) =>
-            prepareMCPAuthorizationMutation(scope, {
-              invalidateRecoveryGeneration: invalidateCachedTools,
-              persistPublicationRetry: persistMCPAuthorizationFenceRetry,
-              clearPublicationRetry: clearMCPAuthorizationFenceRetry,
-              clearLocalRecovery: (userId, changedServerName) =>
-                mcpManager.clearCatalogRecoveryState?.(userId, changedServerName),
-              retryDelaysMs: recoveryPolicy?.authorizationFenceRetryMs,
-              attemptTimeoutMs: recoveryPolicy?.authorizationFenceTimeoutMs,
-            }),
-          oauthStart,
-          oauthEnd: oauthPrompt.end,
-          unattended,
-          graphTokenResolver: getGraphApiToken,
-          oboTokenResolver: exchangeOboToken,
-          oboTrustChecker: createOboTrustChecker(),
-          upstreamTokenProvider: capturedUpstreamTokenProvider,
-          upstreamTokenProviderResolver: capturedUpstreamTokenProviderResolver,
-          oboIdentityContext: capturedOboIdentityContext,
-          mcpApps: capturedMCPApps,
-        }),
+        ),
       );
     } catch (error) {
       /** A user Stop aborts every in-flight call at once, and that rejection is

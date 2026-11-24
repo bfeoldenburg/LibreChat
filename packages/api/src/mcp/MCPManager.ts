@@ -1528,6 +1528,7 @@ Please follow these instructions when using tools from the respective MCP server
     toolName,
     provider,
     toolArguments,
+    imageContext,
     options,
     tokenMethods,
     requestBody,
@@ -1559,6 +1560,8 @@ Please follow these instructions when using tools from the respective MCP server
     toolName: string;
     provider: t.Provider;
     toolArguments?: Record<string, unknown>;
+    /** Host-only context factory; invoked afresh for each transport attempt. */
+    imageContext?: () => Record<string, string | boolean>;
     options?: RequestOptions;
     requestBody?: RequestBody;
     requestScopedConnections?: t.RequestScopedMCPConnectionStore;
@@ -2037,6 +2040,7 @@ Please follow these instructions when using tools from the respective MCP server
                   params: {
                     name: toolName,
                     arguments: toolArguments,
+                    ...(imageContext && { _meta: { 'librechat/image': imageContext() } }),
                   },
                 },
                 CallToolResultSchema,

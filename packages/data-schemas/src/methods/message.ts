@@ -286,7 +286,10 @@ function sanitizeMessageUpdate(update: Record<string, unknown>): Record<string, 
 }
 
 /** Conservatively admit any server-bound resource to the slow path, including legacy MIME forms. */
-const NO_BOUND_APPS = { 'attachments.ui_resources.serverBinding': { $exists: false } };
+const NO_BOUND_APPS = {
+  'attachments.ui_resources.serverBinding': { $exists: false },
+  'files.metadata.mcpImage': { $ne: true },
+};
 
 /**
  * A terminal save that must drop a stored `contextMeta` unsets it in the same
@@ -1119,6 +1122,16 @@ export function createMessageMethods(
   ): Promise<Record<string, unknown>> {
     const Message = mongoose.models.Message as Model<IMessage>;
     const safeUpdate = sanitizeMessageUpdate(update);
+    const imported = Array.isArray(current?.files)
+      ? current.files.filter((file) => file?.metadata?.mcpImage === true)
+      : [];
+    if (imported.length && Array.isArray(safeUpdate.files)) {
+      const ids = new Set(imported.map((file) => file.file_id));
+      safeUpdate.files = [
+        ...safeUpdate.files.filter((file) => !ids.has(file?.file_id)),
+        ...imported,
+      ];
+    }
     // Omission retains the attachments of THIS fenced row; null/[] explicitly clears them.
     const attachments = Object.prototype.hasOwnProperty.call(safeUpdate, 'attachments')
       ? safeUpdate.attachments
@@ -4279,7 +4292,7 @@ export function createMessageMethods(
         'files.file_id': { $ne: originalFileId },
         'files.metadata.imageOriginalFileId': { $ne: originalFileId },
       },
-      { $push: { files: image } },
+      { $push: { files: image }, $inc: { __v: 1 } },
     );
     return result.modifiedCount === 1;
   }

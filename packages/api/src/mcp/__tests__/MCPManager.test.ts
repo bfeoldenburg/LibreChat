@@ -885,6 +885,41 @@ describe('MCPManager', () => {
       );
     });
 
+    it('sends host image context separately from model arguments', async () => {
+      const manager = new MCPManager();
+      const connection = createConnection();
+      jest.spyOn(manager, 'getConnection').mockResolvedValue(connection);
+      const imageContext = jest.fn(() => ({
+        conversation_id: 'trusted-thread',
+        message_id: 'trusted-answer',
+        call_id: 'trusted-call',
+        new_intent: true,
+      }));
+      await manager.callTool({
+        user: mockUser,
+        serverName,
+        serverConfig,
+        toolName: 'generate_image',
+        toolArguments: { prompt: 'Qwen prompt' },
+        imageContext,
+        provider: 'openai',
+        flowManager: mockFlowManager,
+      });
+      expect(imageContext).toHaveBeenCalledTimes(1);
+      expect(connection.client.request).toHaveBeenCalledWith(
+        {
+          method: 'tools/call',
+          params: {
+            name: 'generate_image',
+            arguments: { prompt: 'Qwen prompt' },
+            _meta: { 'librechat/image': imageContext.mock.results[0].value },
+          },
+        },
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
     it('updates activity when a cached connection is replaced during an in-flight call', async () => {
       const manager = new MCPManager();
       const activeConnection = createConnection();

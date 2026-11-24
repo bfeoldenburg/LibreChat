@@ -37,6 +37,29 @@ import {
   isSafeLinkUrl,
 } from './config';
 
+describe('native MCP image generation configuration', () => {
+  it('is opt-in and accepts an explicit operator flag', () => {
+    const server = { type: 'streamable-http', url: 'http://media-mcp:8000/mcp' };
+    const omitted = configSchema.parse({ version: '1.3.18', mcpServers: { media: server } });
+    expect(omitted.mcpServers?.media.nativeImageGeneration).toBeUndefined();
+    const enabled = configSchema.parse({
+      version: '1.3.18',
+      mcpServers: {
+        media: { ...server, nativeImageGeneration: true },
+      },
+    });
+    expect(enabled.mcpServers?.media.nativeImageGeneration).toBe(true);
+    expect(
+      configSchema.safeParse({
+        version: '1.3.18',
+        mcpServers: {
+          media: { ...server, nativeImageGeneration: 'true' },
+        },
+      }).success,
+    ).toBe(false);
+  });
+});
+
 describe('local configuration cache limits', () => {
   it('defaults an explicit block and keeps the policy deployment-only', () => {
     expect(configSchema.parse({ version: '1.3.18' }).configCache).toBeUndefined();

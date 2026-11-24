@@ -38,6 +38,7 @@ const {
   feedSubagentAggregator,
   getAttachmentOwnership,
   getImageAttachmentContent,
+  collectMCPImageAttachments,
   collectToolCallIds,
   createToolTimingAdapter,
   stampCommandExecutor,
@@ -930,6 +931,14 @@ function createToolEndCallback({ req, res, artifactPromises, streamId = null, jo
     if (!output.artifact) {
       return;
     }
+
+    collectMCPImageAttachments({
+      artifact: output.artifact,
+      artifactPromises,
+      metadata,
+      toolCallId: output.tool_call_id,
+      writeAttachment: (attachment) => writeAttachment(res, streamId, attachment, jobCreatedAt),
+    });
 
     if (output.artifact[Tools.file_search]) {
       artifactPromises.push(

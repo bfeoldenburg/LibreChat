@@ -16,7 +16,12 @@ import type {
   TextContent,
   Tool,
 } from '@modelcontextprotocol/sdk/types.js';
-import type { SearchResultData, UIResource, TMCPAppOperationLimits } from 'librechat-data-provider';
+import type {
+  SearchResultData,
+  UIResource,
+  TMCPAppOperationLimits,
+  ImageFile,
+} from 'librechat-data-provider';
 import type { TokenMethods, IUser } from '@librechat/data-schemas';
 import type { LCTool } from '@librechat/agents';
 import type {
@@ -153,6 +158,8 @@ export type Artifacts =
       content?: FormattedContent[];
       /** Original generated images for storage, separate from model-bound content. */
       imageAttachments?: FormattedContent[];
+      /** Existing native images, verified by the host; never decoded from MCP content. */
+      nativeImageFiles?: ImageFile[];
       [Tools.ui_resources]?: {
         data: UIResource[];
       };
