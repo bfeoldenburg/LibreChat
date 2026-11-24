@@ -184,7 +184,7 @@ export function collectMCPImageAttachments({
   metadata: { run_id?: string; thread_id?: string };
   toolCallId: string;
   writeAttachment: (file: ImageFile) => void;
-}) {
+}): void {
   for (const file of artifact?.nativeImageFiles ?? []) {
     const attachment = {
       ...file,
