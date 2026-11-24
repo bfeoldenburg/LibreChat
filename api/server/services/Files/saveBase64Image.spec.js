@@ -25,7 +25,7 @@ jest.mock('~/server/services/Config', () => ({ checkCapability: jest.fn() }));
 jest.mock('~/server/utils/queue', () => ({ LB_QueueAsyncCall: jest.fn() }));
 
 const db = require('~/models');
-const { saveBase64Image } = require('./process');
+const { saveBase64Image, savePreparedImage } = require('./process');
 
 const req = {
   user: { id: 'user-1', tenantId: null },
@@ -170,4 +170,37 @@ describe('saveBase64Image original raster storage', () => {
     expect(getStrategyFunctions.mock.calls).toHaveLength(before);
     expect(db.createFile.mock.calls).toHaveLength(writes);
   });
+});
+
+it('saves an already prepared original through the native strategy with the result association', async () => {
+  const input = await sharp({
+    create: { width: 12, height: 8, channels: 3, background: 'red' },
+  })
+    .png()
+    .toBuffer();
+  const request = { ...req, user: { id: 'real-owner', tenantId: 'real-tenant' } };
+  const association = {
+    conversationId: 'actual-conversation',
+    messageId: 'actual-result',
+    metadata: { imageDisplayFileId: 'preview-id' },
+  };
+  const file = await savePreparedImage(
+    { buffer: input, type: 'image/png', bytes: input.length, width: 12, height: 8 },
+    {
+      req: request,
+      file_id: 'file-id',
+      filename: 'image-original',
+      context: 'image_generation',
+      association,
+    },
+  );
+  const { getStrategyFunctions } = require('~/server/services/Files/strategies');
+  const { saveBuffer } = getStrategyFunctions.mock.results.at(-1).value;
+  expect(saveBuffer).toHaveBeenCalledWith({
+    userId: 'real-owner',
+    tenantId: 'real-tenant',
+    buffer: input,
+    fileName: 'file-id-image-original.png',
+  });
+  expect(file).toMatchObject({ ...association, user: 'real-owner', tenantId: 'real-tenant' });
 });

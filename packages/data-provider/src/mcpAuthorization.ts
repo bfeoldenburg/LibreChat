@@ -11,6 +11,10 @@ export const mcpAuthorizationConfigSchema = z
     /** Default and maximum requested catalog page size; hard safety ceiling: 500. */
     groupCatalogPageSize: z.number().int().min(1).max(500).default(100),
     /** Pins the service credential to one LibreChat tenant; absent means tenantless users. */
+    imageImportApiKeyEnv: z
+      .string()
+      .regex(/^[A-Z][A-Z0-9_]{0,127}$/)
+      .optional(),
     tenantId: z
       .string()
       .trim()

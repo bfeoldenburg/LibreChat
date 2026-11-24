@@ -230,6 +230,8 @@ export interface IMongoFile extends Omit<Document, 'model'> {
   width?: number;
   height?: number;
   metadata?: {
+    imageOriginalFileId?: string;
+    imageDisplayFileId?: string;
     runFile?: RunFileProvenance;
     /**
      * Code-environment cache pointer for files re-uploadable to

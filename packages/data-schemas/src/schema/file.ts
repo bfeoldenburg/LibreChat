@@ -157,6 +157,8 @@ const file: Schema<IMongoFile> = new Schema(
     width: Number,
     height: Number,
     metadata: {
+      imageOriginalFileId: { type: String },
+      imageDisplayFileId: { type: String },
       codeOutput: { type: codeOutputProvenanceSchema, default: undefined },
       runFile: {
         type: runFileProvenanceSchema,

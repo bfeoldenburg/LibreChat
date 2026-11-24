@@ -1690,21 +1690,29 @@ async function saveBase64Image(
   url,
   { req, file_id: _file_id, filename: _filename, endpoint, context, resolution },
 ) {
-  const retentionExpiryPromise = getRetentionExpiry(req);
-  const appConfig = req.config;
-  const file_id = _file_id ?? v4();
-  let filename = `${file_id}-${_filename}`;
   const { buffer: inputBuffer, type: declaredType } = base64ToBuffer(url);
-
   const image = await prepareGeneratedImage(
     inputBuffer,
-    { config: appConfig.fileConfig?.imageGeneration, resolution, endpoint },
+    { config: req.config.fileConfig?.imageGeneration, resolution, endpoint },
     { resizeImageBuffer },
   );
-  /** Sharp re-encodes what it resizes, so the bytes being saved are not necessarily in the
-   * format the data URL declared — an SVG arrives here and is rasterized to PNG. The record has
-   * to describe the bytes, because `file.type` is handed to providers verbatim as `media_type`
-   * (Anthropic), `inlineData.mimeType` (Google), and the `data:` prefix (OpenAI). */
+  return savePreparedImage(image, {
+    req,
+    file_id: _file_id,
+    filename: _filename,
+    context,
+    declaredType,
+  });
+}
+
+async function savePreparedImage(
+  image,
+  { req, file_id = v4(), filename: _filename, context, declaredType, association },
+) {
+  const retentionExpiry = await getRetentionExpiry(req);
+  const appConfig = req.config;
+  let filename = `${file_id}-${_filename}`;
+  // Describe the bytes being stored, including when image preparation changed the type.
   const type = image.type ?? declaredType;
   if (!path.extname(_filename)) {
     const extension = mime.getExtension(type);
@@ -1733,10 +1741,10 @@ async function saveBase64Image(
   return await withStoredUploadCleanup(
     { ...storedCleanup, trackWrite: true },
     async (beginWrite) => {
-      const retentionExpiry = await retentionExpiryPromise;
       beginWrite();
-      return db.createFile(
+      const file = await db.createFile(
         {
+          ...association,
           type,
           source,
           context,
@@ -1753,6 +1761,10 @@ async function saveBase64Image(
         },
         true,
       );
+      if (file == null) {
+        throw new Error('Image file record was not created');
+      }
+      return file;
     },
   );
 }
@@ -1863,6 +1875,7 @@ module.exports = {
   filterFile,
   processFileURL,
   saveBase64Image,
+  savePreparedImage,
   processImageFile,
   uploadImageBuffer,
   sweepExpiredFiles,

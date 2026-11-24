@@ -5,7 +5,7 @@ import {
   RetentionMode,
 } from 'librechat-data-provider';
 import type { ClientSession, DeleteResult, FilterQuery, Model, Types, UpdateQuery } from 'mongoose';
-import type { UserSubmittedMessageFieldPath } from 'librechat-data-provider';
+import type { ImageFile, UserSubmittedMessageFieldPath } from 'librechat-data-provider';
 import type { SearchParams } from 'meilisearch';
 import type { SchemaWithMeiliMethods } from '~/models/plugins/mongoMeili';
 import type { ISubagentContentChunk } from '~/models/subagentContent';
@@ -13,6 +13,7 @@ import type { AppConfig, IConversation, IMessage } from '~/types';
 import { createChatExpirationDate, createTempChatExpirationDate } from '~/utils/tempChatRetention';
 import { activeExpirationFilter, createFallbackRetentionDate } from '~/utils/retention';
 import { fitBoundAppSnapshots, hasBoundAppSnapshots } from './appSnapshots';
+import { tenantPartitionFilter } from '~/models/plugins/tenantIsolation';
 import { prepareSubagentContentDeletion } from './subagentContent';
 import { SERVER_AUTHORED_MESSAGE_FILTER } from '~/utils/authored';
 import { tenantSafeBulkWrite } from '~/utils/tenantBulkWrite';
@@ -955,6 +956,12 @@ export interface MessageMethods {
     tenantId?: string;
     limitPerThread: number;
   }): Promise<ParentSubagentTaskRecord[]>;
+  attachMCPImage(
+    target: { userId: string; conversationId: string; messageId: string },
+    image: ImageFile,
+    originalFileId: string,
+  ): Promise<boolean>;
+
   getMessage(params: { user: string; messageId: string }): Promise<IMessage | null>;
   getBranchLinks(params: { user: string; conversationId: string }): Promise<BranchLinkRow[]>;
   getMessagesByCursor(
@@ -4251,6 +4258,32 @@ export function createMessageMethods(
     ).lean<BranchLinkRow[]>();
   }
 
+  /** Adds one native display file to the existing server-authored result message. */
+  async function attachMCPImage(
+    {
+      userId,
+      conversationId,
+      messageId,
+    }: { userId: string; conversationId: string; messageId: string },
+    image: ImageFile,
+    originalFileId: string,
+  ) {
+    const Message = mongoose.models.Message as Model<IMessage>;
+    const result = await Message.updateOne(
+      {
+        user: userId,
+        conversationId,
+        messageId,
+        $and: [tenantPartitionFilter('attachMCPImage'), activeExpirationFilter()],
+        ...SERVER_AUTHORED_MESSAGE_FILTER,
+        'files.file_id': { $ne: originalFileId },
+        'files.metadata.imageOriginalFileId': { $ne: originalFileId },
+      },
+      { $push: { files: image } },
+    );
+    return result.modifiedCount === 1;
+  }
+
   /**
    * Retrieves a single message from the database.
    */
@@ -4494,6 +4527,7 @@ export function createMessageMethods(
     getMessagesForSubagentThreadView,
     listSubagentTasksForThreads,
     getMessage,
+    attachMCPImage,
     getBranchLinks,
     getMessagesByCursor,
     searchMessages,

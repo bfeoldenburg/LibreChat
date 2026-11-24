@@ -5,7 +5,7 @@ import { resolveImageMimeType } from './mime';
 type ImageGenerationConfig = NonNullable<TFileConfig['imageGeneration']>;
 type ImageResolution = 'low' | 'high' | ImageGenerationConfig;
 
-interface GeneratedImage {
+export interface GeneratedImage {
   buffer: Buffer;
   bytes: number;
   width: number;
@@ -13,7 +13,7 @@ interface GeneratedImage {
   type?: string;
 }
 
-interface GeneratedImageDependencies {
+export interface GeneratedImageDependencies {
   resizeImageBuffer: (
     input: Buffer,
     resolution: ImageResolution,
