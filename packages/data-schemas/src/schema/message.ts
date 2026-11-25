@@ -140,6 +140,11 @@ const messageSchema: Schema<IMessage> = new Schema(
       default: false,
     },
     files: { type: [{ type: mongoose.Schema.Types.Mixed }], default: undefined },
+    mcpImageJobs: {
+      type: [new Schema({ key: String, fileId: String, toolCallId: String }, { _id: false })],
+      default: undefined,
+      select: false,
+    },
     content: {
       type: [{ type: mongoose.Schema.Types.Mixed }],
       default: undefined,

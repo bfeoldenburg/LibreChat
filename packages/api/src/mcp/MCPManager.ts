@@ -1530,6 +1530,7 @@ Please follow these instructions when using tools from the respective MCP server
     provider,
     toolArguments,
     requestMeta,
+    nativeImageResult,
     options,
     tokenMethods,
     requestBody,
@@ -1563,6 +1564,8 @@ Please follow these instructions when using tools from the respective MCP server
     toolArguments?: Record<string, unknown>;
     /** Host-only context factory; invoked afresh for each transport attempt. */
     requestMeta?: () => Record<string, unknown>;
+    /** Keep a generated image on the host's native attachment path. */
+    nativeImageResult?: boolean;
     options?: RequestOptions;
     requestBody?: RequestBody;
     requestScopedConnections?: t.RequestScopedMCPConnectionStore;
@@ -2176,7 +2179,7 @@ Please follow these instructions when using tools from the respective MCP server
         }
         this.checkIdleConnections();
         const toolResult = result as t.MCPToolCallResponse;
-        if (requestMeta && toolName === 'generate_image') {
+        if (nativeImageResult || (requestMeta && toolName === 'generate_image')) {
           const image = formatMCPImageJobResult(toolResult);
           if (image) return image;
         }

@@ -34,6 +34,11 @@ const MAX_SUBAGENT_CONTROL_MESSAGE_LENGTH = 4 * 1024;
 const MAX_SUBAGENT_CONTROL_RECEIPT_CAS_ATTEMPTS = 64;
 const HITL_MESSAGE_FILTER_FIELD_SET = new Set<string>(HITL_MESSAGE_FILTER_FIELDS);
 
+type MCPImageScope = { userId: string; conversationId: string; tenantId?: string };
+type MCPImageTarget = MCPImageScope & { messageId: string };
+type MCPImageJob = NonNullable<IMessage['mcpImageJobs']>[number];
+type MCPImageJobTarget = MCPImageJob & { messageId: string };
+
 function normalizeUserSubmittedPaths(paths: unknown): string[] {
   if (!Array.isArray(paths)) {
     return [];
@@ -280,7 +285,10 @@ function getSteerUserSubmittedPaths(content: unknown): string[] {
 function sanitizeMessageUpdate(update: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(update).filter(
-      ([key, value]) => value !== undefined && !['_id', 'tenantId', '__v'].includes(key),
+      ([key, value]) =>
+        value !== undefined &&
+        !['_id', 'tenantId', '__v', 'mcpImageJobs'].includes(key) &&
+        !key.startsWith('mcpImageJobs.'),
     ),
   );
 }
@@ -288,6 +296,7 @@ function sanitizeMessageUpdate(update: Record<string, unknown>): Record<string, 
 /** Conservatively admit any server-bound resource to the slow path, including legacy MIME forms. */
 const NO_BOUND_APPS = {
   'attachments.ui_resources.serverBinding': { $exists: false },
+  'attachments.metadata.mcpImage': { $ne: true },
   'files.metadata.mcpImage': { $ne: true },
 };
 
@@ -547,6 +556,7 @@ export const CLIENT_MESSAGE_SELECT: string = [
   '-summaryTokenCount',
   '-privateText',
   '-privateTextTokens',
+  '-mcpImageJobs',
   '-contextMeta',
   '-langfuseCentralTraceExportEnabled',
   '-langfuseSampled',
@@ -959,8 +969,10 @@ export interface MessageMethods {
     tenantId?: string;
     limitPerThread: number;
   }): Promise<ParentSubagentTaskRecord[]>;
+  bindMCPImageJob(target: MCPImageTarget, binding: MCPImageJob): Promise<boolean>;
+  findMCPImageJob(scope: MCPImageScope, key: string): Promise<MCPImageJobTarget | null>;
   attachMCPImage(
-    target: { userId: string; conversationId: string; messageId: string },
+    target: MCPImageTarget & { toolCallId?: string },
     image: ImageFile,
     originalFileId: string,
   ): Promise<boolean>;
@@ -1122,13 +1134,20 @@ export function createMessageMethods(
   ): Promise<Record<string, unknown>> {
     const Message = mongoose.models.Message as Model<IMessage>;
     const safeUpdate = sanitizeMessageUpdate(update);
-    const imported = Array.isArray(current?.files)
-      ? current.files.filter((file) => file?.metadata?.mcpImage === true)
-      : [];
-    if (imported.length && Array.isArray(safeUpdate.files)) {
+    // An older terminal snapshot can arrive after the native import.
+    for (const field of ['files', 'attachments'] as const) {
+      if (
+        !Object.prototype.hasOwnProperty.call(safeUpdate, field) ||
+        !Array.isArray(current?.[field])
+      ) {
+        continue;
+      }
+      const imported = current[field].filter((file) => file?.metadata?.mcpImage === true);
+      if (!imported.length) continue;
       const ids = new Set(imported.map((file) => file.file_id));
-      safeUpdate.files = [
-        ...safeUpdate.files.filter((file) => !ids.has(file?.file_id)),
+      const incoming = safeUpdate[field];
+      safeUpdate[field] = [
+        ...(Array.isArray(incoming) ? incoming.filter((file) => !ids.has(file?.file_id)) : []),
         ...imported,
       ];
     }
@@ -1384,7 +1403,7 @@ export function createMessageMethods(
           { messageId: params.messageId, user: userId },
           {
             $setOnInsert: {
-              ...update,
+              ...sanitizeMessageUpdate(update),
               ...(userSubmittedPaths.length > 0 && { userSubmittedPaths }),
               ...(userSubmittedMessageFieldPaths.length > 0 && { userSubmittedMessageFieldPaths }),
               ...retentionOnInsert,
@@ -4271,28 +4290,74 @@ export function createMessageMethods(
     ).lean<BranchLinkRow[]>();
   }
 
-  /** Adds one native display file to the existing server-authored result message. */
+  function imageMessageFilter(scope: MCPImageScope, operation: string): FilterQuery<IMessage> {
+    return {
+      user: scope.userId,
+      conversationId: scope.conversationId,
+      $and: [
+        tenantPartitionFilter(operation),
+        ...(scope.tenantId === undefined ? [] : [{ tenantId: scope.tenantId }]),
+        activeExpirationFilter(),
+      ],
+      ...SERVER_AUTHORED_MESSAGE_FILTER,
+    };
+  }
+
+  async function bindMCPImageJob(target: MCPImageTarget, binding: MCPImageJob): Promise<boolean> {
+    const Message = mongoose.models.Message as Model<IMessage>;
+    const result = await Message.updateOne(
+      {
+        ...imageMessageFilter(target, 'bindMCPImageJob'),
+        messageId: target.messageId,
+        mcpImageJobs: {
+          $not: { $elemMatch: { key: binding.key, fileId: { $ne: binding.fileId } } },
+        },
+      },
+      { $addToSet: { mcpImageJobs: binding } },
+      { timestamps: false },
+    );
+    return result.matchedCount === 1;
+  }
+
+  async function findMCPImageJob(
+    scope: MCPImageScope,
+    key: string,
+  ): Promise<MCPImageJobTarget | null> {
+    const Message = mongoose.models.Message as Model<IMessage>;
+    const row = await Message.findOne(
+      { ...imageMessageFilter(scope, 'findMCPImageJob'), 'mcpImageJobs.key': key },
+      { _id: 0, messageId: 1, mcpImageJobs: { $elemMatch: { key } } },
+    ).lean<Pick<IMessage, 'messageId' | 'mcpImageJobs'>>();
+    const binding = row?.mcpImageJobs?.[0];
+    return row && binding ? { messageId: row.messageId, ...binding } : null;
+  }
+
+  /** Adds one native display file and its renderable attachment to the same message. */
   async function attachMCPImage(
-    {
-      userId,
-      conversationId,
-      messageId,
-    }: { userId: string; conversationId: string; messageId: string },
+    target: MCPImageTarget & { toolCallId?: string },
     image: ImageFile,
     originalFileId: string,
   ) {
     const Message = mongoose.models.Message as Model<IMessage>;
     const result = await Message.updateOne(
       {
-        user: userId,
-        conversationId,
-        messageId,
-        $and: [tenantPartitionFilter('attachMCPImage'), activeExpirationFilter()],
-        ...SERVER_AUTHORED_MESSAGE_FILTER,
+        ...imageMessageFilter(target, 'attachMCPImage'),
+        messageId: target.messageId,
         'files.file_id': { $ne: originalFileId },
         'files.metadata.imageOriginalFileId': { $ne: originalFileId },
       },
-      { $push: { files: image }, $inc: { __v: 1 } },
+      {
+        $push: {
+          files: image,
+          attachments: {
+            ...image,
+            conversationId: target.conversationId,
+            messageId: target.messageId,
+            toolCallId: target.toolCallId,
+          },
+        },
+        $inc: { __v: 1 },
+      },
     );
     return result.modifiedCount === 1;
   }
@@ -4540,6 +4605,8 @@ export function createMessageMethods(
     getMessagesForSubagentThreadView,
     listSubagentTasksForThreads,
     getMessage,
+    bindMCPImageJob,
+    findMCPImageJob,
     attachMCPImage,
     getBranchLinks,
     getMessagesByCursor,

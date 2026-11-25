@@ -22,6 +22,8 @@ import type { PermissionPlan } from './audit';
 import {
   PERMISSION_AUDIT_UNAVAILABLE,
   RESOURCE_PERMISSIONS_UNAVAILABLE,
+  ResourcePermissionsBusyError,
+  ResourcePermissionsUnavailableError,
   PRINCIPAL_PREPARATION_FAILED,
   DIRECTORY_VERIFICATION_UNAVAILABLE,
 } from './codes';
@@ -58,24 +60,7 @@ const RESOURCE_LOCK_TTL_MS = 30_000;
 const RESOURCE_LOCK_WAIT_MS = 3_000;
 const RESOURCE_LOCK_POLL_MS = 50;
 
-/** The lock store failed; a safe, retryable 503 instead of a raw driver error. */
-export class ResourcePermissionsUnavailableError extends Error {
-  readonly statusCode = 503;
-  readonly code: string = RESOURCE_PERMISSIONS_UNAVAILABLE;
-
-  constructor() {
-    super('Permissions for this resource cannot be updated right now, try again');
-  }
-}
-
-export class ResourcePermissionsBusyError extends Error {
-  readonly statusCode = 409;
-  readonly code = 'RESOURCE_PERMISSIONS_BUSY';
-
-  constructor() {
-    super('Permissions for this resource are being updated, try again');
-  }
-}
+export { ResourcePermissionsBusyError, ResourcePermissionsUnavailableError } from './codes';
 
 const APPROVED_ERROR_CODES = new Set([
   PRINCIPAL_PREPARATION_FAILED,

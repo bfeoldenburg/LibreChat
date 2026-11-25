@@ -5,7 +5,9 @@ import type { AppConfig, IMessage } from '@librechat/data-schemas';
 import type { ImageFile } from 'librechat-data-provider';
 import type { Readable } from 'node:stream';
 import type { GeneratedImage, GeneratedImageDependencies } from '~/files/generation';
+import type { LeaseDeps } from '~/admin/lease';
 import { prepareGeneratedImage } from '~/files/generation';
+import { withLease } from '~/admin/lease';
 
 const MAX_IMAGE_BYTES = 16_777_216;
 const rasterTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/tiff']);
@@ -33,7 +35,13 @@ type ImportFile = {
   storageOperations?: { deleting?: string; deletionPending?: boolean };
   metadata?: ImageLinks;
 };
-type Target = { userId: string; conversationId: string; messageId: string };
+type Target = {
+  userId: string;
+  tenantId?: string;
+  conversationId: string;
+  messageId: string;
+  toolCallId?: string;
+};
 type StorageRequest = {
   user: Owner;
   config: AppConfig;
@@ -42,6 +50,7 @@ type StorageRequest = {
 };
 
 export interface ImageStorageDependencies {
+  lease?: LeaseDeps;
   getMessage: (query: {
     user: string;
     messageId: string;
@@ -200,6 +209,7 @@ async function store(
   user: Owner,
   config: AppConfig,
   deps: ImageStorageDependencies,
+  fence: () => Promise<void>,
 ) {
   const tenantId = user.tenantId;
   const [message, existing] = await Promise.all([
@@ -240,6 +250,7 @@ async function store(
   } else {
     const prepared = await prepare(input, mime, config, deps.resizeImageBuffer);
     preparedDisplay = prepared.display;
+    await fence();
     originalFile = await deps.savePreparedImage(prepared.original, {
       req,
       file_id: fileId,
@@ -276,6 +287,7 @@ async function store(
           )
         ).display;
       if (!display) throw new Error('image_file_unavailable');
+      await fence();
       const saved = await deps.savePreparedImage(display, {
         req,
         file_id: previewId,
@@ -287,6 +299,7 @@ async function store(
       displayFile = saved;
     }
   }
+  await fence();
   if (!(await deps.attachMCPImage(target, asMCPImageFile(displayFile), fileId))) {
     throw new Error('image_target_unavailable');
   }
@@ -298,6 +311,7 @@ export interface ImageStorageInput {
   config: AppConfig;
   conversationId: string;
   messageId: string;
+  toolCallId?: string;
   fileId: string;
   dataUrl: string;
 }
@@ -311,6 +325,7 @@ export function createMCPImageStorage(
     if (!uuid.test(input.fileId)) throw new Error('image_file_invalid');
     const key = JSON.stringify([
       input.user.id,
+      input.user.tenantId,
       input.conversationId,
       input.messageId,
       input.fileId,
@@ -330,14 +345,23 @@ export function createMCPImageStorage(
       if (!data.length || data.length > MAX_IMAGE_BYTES || data.toString('base64') !== match[2]) {
         throw new Error('image_content_invalid');
       }
-      return store(
-        { userId: input.user.id, conversationId: input.conversationId, messageId: input.messageId },
-        input.fileId,
-        match[1],
-        data,
-        input.user,
-        input.config,
-        deps,
+      return withLease(deps.lease, 'mcp-image:' + input.fileId, (fence) =>
+        store(
+          {
+            userId: input.user.id,
+            tenantId: input.user.tenantId,
+            conversationId: input.conversationId,
+            messageId: input.messageId,
+            toolCallId: input.toolCallId,
+          },
+          input.fileId,
+          match[1],
+          data,
+          input.user,
+          input.config,
+          deps,
+          fence,
+        ),
       );
     };
     const operation = save();

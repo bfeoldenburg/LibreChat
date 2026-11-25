@@ -19,10 +19,12 @@ import {
   formatMCPImageJobResult,
 } from '../../../api/src/mcp/generation';
 import { createMCPMembershipRouter } from '../../../api/src/mcp/membership';
+import { CLIENT_MESSAGE_SELECT, createMessageMethods } from './message';
 import { createMCPImageStorage } from '../../../api/src/mcp/images';
 import { formatToolContent } from '../../../api/src/mcp/parsers';
+import { createResourceLockMethods } from './resourceLock';
+import { createConversationMethods } from './conversation';
 import { tenantStorage } from '~/config/tenantContext';
-import { createMessageMethods } from './message';
 import { createFileMethods } from './file';
 import { createModels } from '../models';
 const root = process.env.MEDIA_MCP_TEST_ROOT;
@@ -32,17 +34,19 @@ const OWNER = 'a'.repeat(24);
 const GROUP = 'c'.repeat(24);
 const READ_KEY = 'test-callback-' + 'l'.repeat(32);
 const GATEWAY = 'test-gateway-' + 'g'.repeat(32);
-integration('foreground image generation with real MCP and native MongoDB attachments', () => {
-  it('stores linked originals/displays, preserves the final attachment, deduplicates and leaves running jobs alone', async () => {
+integration('on-demand image retrieval with real MCP and native MongoDB attachments', () => {
+  it('retrieves an existing running job and persists its image on the original answer', async () => {
     const mongo = await MongoMemoryServer.create();
     const directory = await mkdtemp(join(tmpdir(), 'mcp-generation-'));
     await mongoose.connect(mongo.getUri());
-    createModels(mongoose);
+    const models = createModels(mongoose);
+    await models.ResourceLock.init();
     const messages = createMessageMethods(mongoose);
+    const conversations = createConversationMethods(mongoose);
     const files = createFileMethods(mongoose);
     const conversationId = randomUUID();
     const messageId = randomUUID();
-    const conversation = await mongoose.models.Conversation.create({
+    await mongoose.models.Conversation.create({
       user: OWNER,
       conversationId,
       title: 'Synthetic image test',
@@ -67,32 +71,34 @@ integration('foreground image generation with real MCP and native MongoDB attach
       .tiff()
       .toBuffer();
     await writeFile(join(directory, 'source.tiff'), source);
+    const savePreparedImage = jest.fn(async (image, options) => {
+      const { req, file_id, filename, context, association } = options;
+      await writeFile(join(directory, file_id), image.buffer);
+      return files.createFile(
+        {
+          ...association,
+          file_id,
+          filename,
+          context,
+          user: req.user.id,
+          source: 'local',
+          filepath: '/images/' + file_id,
+          type: image.type,
+          bytes: image.bytes,
+          width: image.width,
+          height: image.height,
+        },
+        true,
+      );
+    });
     const imageStorage = {
+      lease: createResourceLockMethods(mongoose),
       getMessage: messages.getMessage,
       findFileById: files.findFileById,
       attachMCPImage: messages.attachMCPImage,
       // Test storage adapter: actual temporary files and native File rows.
       // The production provider's storage strategy is tested separately.
-      savePreparedImage: async (image, options) => {
-        const { req, file_id, filename, context, association } = options;
-        await writeFile(join(directory, file_id), image.buffer);
-        return files.createFile(
-          {
-            ...association,
-            file_id,
-            filename,
-            context,
-            user: req.user.id,
-            source: 'local',
-            filepath: '/images/' + file_id,
-            type: image.type,
-            bytes: image.bytes,
-            width: image.width,
-            height: image.height,
-          },
-          true,
-        );
-      },
+      savePreparedImage,
       readStoredImage: async (_req, file) =>
         Readable.from([await readFile(join(directory, file.file_id))]),
       resizeImageBuffer: async () => {
@@ -157,7 +163,9 @@ integration('foreground image generation with real MCP and native MongoDB attach
       {
         env: {
           ...process.env,
-          PYTHONPATH: join(root, 'mcp-media/src'),
+          PYTHONPATH: [join(root, 'mcp-media/src'), process.env.PYTHONPATH]
+            .filter(Boolean)
+            .join(':'),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       },
@@ -197,21 +205,25 @@ integration('foreground image generation with real MCP and native MongoDB attach
       ).toBe(404);
       const invokeTool = async (_manager, invocation) => {
         const result = await client.callTool({
-          name: 'generate_image',
+          name: invocation.toolName,
           arguments: invocation.toolArguments,
           _meta: invocation.requestMeta?.(),
         });
         return formatMCPImageJobResult(result) ?? formatToolContent(result, 'openai');
       };
-      const call = createMCPImageInvoker({
-        invokeTool,
-        deps: {
-          saveMessage: messages.saveMessage,
-          getConvo: async () => conversation,
-          getAppConfig: async () => storageConfig,
-          saveImage: createMCPImageStorage(imageStorage),
-        },
-      });
+      const createHost = () =>
+        createMCPImageInvoker({
+          invokeTool,
+          deps: {
+            saveMessage: messages.saveMessage,
+            bindJob: messages.bindMCPImageJob,
+            findJob: messages.findMCPImageJob,
+            getConvo: conversations.getConvo,
+            getAppConfig: async () => storageConfig,
+            saveImage: createMCPImageStorage(imageStorage),
+          },
+        });
+      const call = createHost();
       const manager = {
         callTool: jest.fn(),
       };
@@ -223,7 +235,7 @@ integration('foreground image generation with real MCP and native MongoDB attach
           id: OWNER,
         },
         toolArguments: {
-          prompt: 'A green fox, as authored by Qwen.',
+          prompt: 'delayed-result',
         },
         flowManager: {},
       };
@@ -232,9 +244,59 @@ integration('foreground image generation with real MCP and native MongoDB attach
         messageId,
         toolCallId: 'qwen-call-1',
       };
-      const [text, artifact] = await call(manager, invocation, context);
+      const [running] = await call(manager, invocation, context);
+      const started = JSON.parse(running);
+      expect(started).toMatchObject({ status: 'running', delivery_status: 'not_started' });
+      const laterContext = { conversationId, messageId: randomUUID(), toolCallId: 'qwen-call-2' };
+      const statusInvocation = {
+        ...invocation,
+        toolName: 'get_media_job_status',
+        toolArguments: { job_reference: started.job_reference },
+      };
+      const resultInvocation = { ...statusInvocation, toolName: 'get_media_result' };
+      const readStatus = async () =>
+        JSON.parse((await call(manager, statusInvocation, laterContext))[0]).status;
+      expect(await readStatus()).toBe('running');
+      const [pending, pendingArtifact] = await call(manager, resultInvocation, laterContext);
+      expect(JSON.parse(pending)).toMatchObject({
+        status: 'running',
+        job_reference: started.job_reference,
+      });
+      expect(pendingArtifact).toBeUndefined();
+      expect(savePreparedImage).not.toHaveBeenCalled();
+
+      // Save the original response after generation and before the user asks for the image.
+      const saveOriginal = () =>
+        messages.saveMessage(
+          { userId: OWNER },
+          {
+            conversationId,
+            messageId,
+            text: 'Final answer',
+            files: [],
+            attachments: [],
+            isCreatedByUser: false,
+          },
+        );
+      await saveOriginal();
+      expect(await messages.getMessage({ user: OWNER, messageId })).not.toHaveProperty(
+        'mcpImageJobs',
+      );
+      await fetch(`http://127.0.0.1:${port}/test-complete`, { method: 'POST' });
+      for (let attempt = 0; (await readStatus()) !== 'succeeded'; attempt++) {
+        if (attempt >= 40) throw new Error('Test worker did not finish: ' + diagnostics);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      // Independent host/storage instances share MongoDB but no in-process deduplication state.
+      const anotherHost = createHost();
+      const [[text, artifact], [concurrent]] = await Promise.all([
+        call(manager, resultInvocation, laterContext),
+        anotherHost(manager, resultInvocation, { ...laterContext, toolCallId: 'qwen-call-3' }),
+      ]);
       const receipt = JSON.parse(text);
-      expect(receipt.delivery_status).toBe('stored');
+      expect(receipt).toMatchObject({ status: 'stored', delivery_status: 'stored' });
+      expect(JSON.parse(concurrent)).toEqual(receipt);
+      expect(savePreparedImage).toHaveBeenCalledTimes(2);
       expect(receipt.file_id).not.toBe(receipt.display_file_id);
       expect(await readFile(join(directory, receipt.file_id))).toEqual(source);
       expect(
@@ -252,37 +314,46 @@ integration('foreground image generation with real MCP and native MongoDB attach
         artifact,
         artifactPromises: collected,
         metadata: {
-          run_id: messageId,
+          run_id: laterContext.messageId,
           thread_id: conversationId,
         },
-        toolCallId: 'qwen-call-1',
+        toolCallId: laterContext.toolCallId,
         writeAttachment: emit,
       });
-      expect(await Promise.all(collected)).toHaveLength(1);
-      expect(emit).toHaveBeenCalledTimes(1);
-      // A terminal/disconnect snapshot made before import cannot erase the attachment.
-      await messages.saveMessage(
-        {
-          userId: OWNER,
-        },
-        {
-          conversationId,
+      expect(collected).toHaveLength(0);
+      expect(emit).toHaveBeenCalledWith(
+        expect.objectContaining({
           messageId,
-          text: 'Final answer',
-          files: [],
-          isCreatedByUser: false,
-        },
+          toolCallId: context.toolCallId,
+          file_id: receipt.display_file_id,
+        }),
       );
-      const saved = await messages.getMessage({
-        user: OWNER,
-        messageId,
-      });
+      // A stale final/disconnect snapshot cannot erase the display attachment.
+      await saveOriginal();
+      const [saved] = await messages.getMessages(
+        { user: OWNER, conversationId, messageId },
+        CLIENT_MESSAGE_SELECT,
+      );
+      expect(saved).not.toHaveProperty('mcpImageJobs');
       expect(saved?.files).toEqual([
         expect.objectContaining({
           file_id: receipt.display_file_id,
         }),
       ]);
-      expect(JSON.parse((await call(manager, invocation, context))[0])).toEqual(receipt);
+      expect(saved?.attachments).toEqual([
+        expect.objectContaining({
+          file_id: receipt.display_file_id,
+          messageId,
+          toolCallId: context.toolCallId,
+        }),
+      ]);
+      expect(
+        await messages.getMessage({ user: OWNER, messageId: laterContext.messageId }),
+      ).toBeNull();
+      expect(JSON.parse((await anotherHost(manager, resultInvocation, laterContext))[0])).toEqual(
+        receipt,
+      );
+      expect(savePreparedImage).toHaveBeenCalledTimes(2);
       expect(await mongoose.models.File.countDocuments()).toBe(2);
       const invalid = await call(
         manager,
@@ -302,7 +373,8 @@ integration('foreground image generation with real MCP and native MongoDB attach
       expect(await (await fetch(`http://127.0.0.1:${port}/test-state`)).json()).toEqual({
         jobs: 1,
       });
-      const running = await call(
+      const otherTarget = { ...context, messageId: randomUUID(), toolCallId: 'deleted-target' };
+      const other = await call(
         manager,
         {
           ...invocation,
@@ -310,15 +382,43 @@ integration('foreground image generation with real MCP and native MongoDB attach
             prompt: 'still-running',
           },
         },
-        {
-          ...context,
-          toolCallId: 'running',
-        },
+        otherTarget,
       );
-      expect(JSON.parse(running[0])).toMatchObject({
+      expect(JSON.parse(other[0])).toMatchObject({
         status: 'queued',
         delivery_status: 'not_started',
       });
+      const otherResult = {
+        ...resultInvocation,
+        toolArguments: { job_reference: JSON.parse(other[0]).job_reference },
+      };
+      await messages.deleteMessages({ user: OWNER, messageId: otherTarget.messageId });
+      const [deleted] = await call(manager, otherResult, laterContext);
+      expect(JSON.parse(deleted).status).toBe('job_unavailable');
+      const [missing] = await call(
+        manager,
+        { ...resultInvocation, toolArguments: { job_reference: '0'.repeat(32) } },
+        laterContext,
+      );
+      expect(missing).toBe(deleted);
+      const [wrongOwner] = await call(
+        manager,
+        { ...resultInvocation, user: { id: 'b'.repeat(24) } },
+        laterContext,
+      );
+      expect(wrongOwner).toBe(deleted);
+      const [wrongTenant] = await call(
+        manager,
+        { ...resultInvocation, user: { id: OWNER, tenantId: 'other-tenant' } },
+        laterContext,
+      );
+      expect(wrongTenant).toBe(deleted);
+      const [wrongConversation] = await call(manager, resultInvocation, {
+        ...laterContext,
+        conversationId: randomUUID(),
+      });
+      expect(wrongConversation).toBe(deleted);
+      expect(savePreparedImage).toHaveBeenCalledTimes(2);
       expect(await (await fetch(`http://127.0.0.1:${port}/test-state`)).json()).toEqual({
         jobs: 2,
       });

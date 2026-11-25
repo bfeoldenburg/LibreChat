@@ -80,6 +80,11 @@ const {
 const db = require('~/models');
 const { resizeImageBuffer } = require('~/server/services/Files/images/resize');
 const saveMCPImage = createMCPImageStorage({
+  lease: {
+    acquireResourceLock: db.acquireResourceLock,
+    renewResourceLock: db.renewResourceLock,
+    releaseResourceLock: db.releaseResourceLock,
+  },
   getMessage: db.getMessage,
   findFileById: db.findFileById,
   attachMCPImage: db.attachMCPImage,
@@ -1287,6 +1292,8 @@ function createToolInstance({
     invokeTool,
     deps: {
       saveMessage: db.saveMessage,
+      bindJob: db.bindMCPImageJob,
+      findJob: db.findMCPImageJob,
       getConvo: db.getConvo,
       getAppConfig,
       saveImage: saveMCPImage,

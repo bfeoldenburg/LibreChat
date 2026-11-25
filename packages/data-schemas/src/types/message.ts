@@ -89,6 +89,8 @@ export interface IMessage extends Document {
   langfuseRunId?: string;
   _meiliIndex?: boolean;
   files?: unknown[];
+  /** Private job bindings written by the MCP image host. */
+  mcpImageJobs?: { key: string; fileId: string; toolCallId: string }[];
   plugin?: {
     latest?: string;
     inputs?: unknown[];

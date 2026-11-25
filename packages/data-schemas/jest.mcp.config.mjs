@@ -17,6 +17,8 @@ export default {
     '^librechat-data-provider$': '<rootDir>/../data-provider/src/index.ts',
     '^~/files/generation$': '<rootDir>/../api/src/files/generation.ts',
     '^~/utils/errors$': '<rootDir>/../api/src/utils/errors.ts',
+    '^~/admin/lease$': '<rootDir>/../api/src/admin/lease.ts',
+    '^~/acl/codes$': '<rootDir>/../api/src/acl/codes.ts',
     ...base.moduleNameMapper,
   },
 };

@@ -11,6 +11,8 @@ const dataUrl = 'data:image/png;base64,c3ludGhldGlj';
 function harness(image = true) {
   const saved = { conversationId, isCreatedByUser: false, isUserSubmitted: false };
   const deps = {
+    bindJob: jest.fn(async () => true),
+    findJob: jest.fn(async () => null),
     saveMessage: jest.fn(async (): Promise<typeof saved | undefined> => saved),
     getConvo: jest.fn(async () => ({})),
     getAppConfig: jest.fn(async () => ({}) as AppConfig),
@@ -63,12 +65,27 @@ it('provides only an opaque request identity and marks transport retries', async
   expect(JSON.stringify(metadata)).not.toContain(conversationId);
   expect(h.deps.saveMessage).not.toHaveBeenCalled();
 });
-it('leaves catalog and other non-image results on the existing path without database reads', async () => {
+it('binds a queued job and leaves catalog results on the existing path', async () => {
   const h = harness(false);
   const result = await h.call(h.manager, h.invocation, context);
   expect(result[1]).toBeUndefined();
+  expect(h.deps.bindJob).toHaveBeenCalledWith(
+    {
+      userId: h.invocation.user?.id,
+      tenantId: undefined,
+      conversationId,
+      messageId: context.messageId,
+    },
+    {
+      key: JSON.stringify([h.invocation.serverName, 'f'.repeat(32)]),
+      fileId: expect.any(String),
+      toolCallId: context.toolCallId,
+    },
+  );
+  expect(h.deps.saveImage).not.toHaveBeenCalled();
+  h.deps.getConvo.mockClear();
+  await h.call(h.manager, { ...h.invocation, toolName: 'list_media_options' }, context);
   expect(h.deps.getConvo).not.toHaveBeenCalled();
-  expect(h.deps.getAppConfig).not.toHaveBeenCalled();
 });
 it('saves the existing result message before local image storage and reports stored afterward', async () => {
   const h = harness();

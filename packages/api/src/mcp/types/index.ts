@@ -159,7 +159,7 @@ export type Artifacts =
       /** Original generated images for storage, separate from model-bound content. */
       imageAttachments?: FormattedContent[];
       /** Existing native images, verified by the host; never decoded from MCP content. */
-      nativeImageFiles?: ImageFile[];
+      nativeImageFiles?: (ImageFile & { messageId?: string; toolCallId?: string })[];
       [Tools.ui_resources]?: {
         data: UIResource[];
       };
