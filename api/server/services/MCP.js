@@ -1,5 +1,5 @@
 const { tool } = require('@librechat/agents/langchain/tools');
-const { logger, getTenantId } = require('@librechat/data-schemas');
+const { logger, getTenantId, tenantStorage } = require('@librechat/data-schemas');
 const { Providers, Constants: AgentConstants } = require('@librechat/agents');
 const {
   sendEvent,
@@ -25,6 +25,7 @@ const {
   processMCPEnv,
   createAgentMCPTool,
   createMCPImageInvoker,
+  createMCPImagePickup,
   createMCPImageStorage,
   resolveDownloadPath,
   preProcessGraphTokens,
@@ -551,6 +552,26 @@ async function resolveAllMcpConfigs(userId, user) {
 
   return await registry.getAllServerConfigs(userId, configServers, undefined, lookup);
 }
+
+const imageJobs = {
+  saveMessage: db.saveMessage,
+  bindJob: db.bindMCPImageJob,
+  findJob: db.findMCPImageJob,
+  getConvo: db.getConvo,
+  getAppConfig,
+  saveImage: saveMCPImage,
+};
+const enqueuePickup = createMCPImagePickup({
+  deps: {
+    ...imageJobs,
+    runWithScope: ({ userId, tenantId }, action) => tenantStorage.run({ userId, tenantId }, action),
+    getUser: db.getUserById,
+    canUseServers: userCanUseMCPServers,
+    getServerConfigs: resolveAllMcpConfigs,
+    getManager: getMCPManager,
+    getFlowManager: () => getFlowStateManager(getLogStores(CacheKeys.FLOWS)),
+  },
+});
 
 /**
  * Best-effort early gate; the authoritative check is
@@ -1288,17 +1309,7 @@ function createToolInstance({
   unattended,
   recoveryPolicy,
 }) {
-  const invokeImageTool = createMCPImageInvoker({
-    invokeTool,
-    deps: {
-      saveMessage: db.saveMessage,
-      bindJob: db.bindMCPImageJob,
-      findJob: db.findMCPImageJob,
-      getConvo: db.getConvo,
-      getAppConfig,
-      saveImage: saveMCPImage,
-    },
-  });
+  const invokeImageTool = createMCPImageInvoker({ invokeTool, deps: imageJobs, enqueuePickup });
   /** @type {LCTool} */
   const { description, parameters } = toolDefinition;
   const isGoogle = capturedProvider === Providers.VERTEXAI || capturedProvider === Providers.GOOGLE;

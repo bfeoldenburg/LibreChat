@@ -1,8 +1,14 @@
 import { z } from 'zod';
-import { createHash } from 'node:crypto';
+import { setTimeout } from 'node:timers/promises';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AppConfig, IUser } from '@librechat/data-schemas';
 import type { ImageFile } from 'librechat-data-provider';
-import type { Artifacts, FormattedToolResponse, MCPToolCallResponse } from './types';
+import type {
+  Artifacts,
+  FormattedToolResponse,
+  MCPToolCallResponse,
+  ParsedServerConfig,
+} from './types';
 import type { AgentMCPToolInvoker } from './agent';
 import type { ImageStorageInput } from './images';
 import { isMCPToolResultError, markMCPToolResultError } from './status';
@@ -18,6 +24,7 @@ type ResultTarget = {
 };
 type JobScope = { userId: string; tenantId?: string; conversationId: string };
 type JobBinding = { key: string; fileId: string; toolCallId: string };
+type Pickup = JobScope & { serverName: string; reference: string; expiresAt: number };
 type Dependencies = {
   bindJob: (target: JobScope & { messageId: string }, binding: JobBinding) => Promise<boolean>;
   findJob: (scope: JobScope, key: string) => Promise<(JobBinding & { messageId: string }) | null>;
@@ -54,6 +61,8 @@ type Dependencies = {
   }) => Promise<AppConfig | undefined>;
   saveImage: (input: ImageStorageInput) => Promise<ImageFile>;
 };
+type LookupDependencies = Pick<Dependencies, 'getConvo' | 'findJob' | 'getAppConfig' | 'saveImage'>;
+type LookupTool = 'get_media_job_status' | 'get_media_result';
 const targetSchema = z.object({
   conversationId: z.string().uuid(),
   messageId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
@@ -65,6 +74,21 @@ const startedSchema = z.object({
   job_reference: jobReference,
   delivery_status: z.enum(['not_started', 'pending', 'failed']),
 });
+const pickupSchema = z.object({
+  status: z.enum(['queued', 'running']),
+  acceptance: z.literal('confirmed'),
+  pickup_expires_at: z.number().int().positive(),
+});
+const statusSchema = z.object({ status: z.string() });
+const pickupRetryStatuses = new Set([
+  'queued',
+  'running',
+  'backend_unavailable',
+  'image_download_failed',
+  'image_storage_failed',
+]);
+const MAX_PICKUP_MS = 30 * 60 * 60 * 1000; // Upper bound of the private MCP job cache.
+const PICKUP_INTERVAL_MS = 5_000; // One status read per interval while the backend is working.
 const resultSchema = z.object({
   job_reference: jobReference,
   status: z.literal('image_ready'),
@@ -176,13 +200,167 @@ async function storeResult(
   ];
 }
 
+function bindingKey(serverName: string, reference: string): string {
+  return JSON.stringify([serverName, reference]);
+}
+
+async function lookupImageJob({
+  deps,
+  scope,
+  user,
+  serverName,
+  reference,
+  toolName,
+  invoke,
+  signal,
+}: {
+  deps: LookupDependencies;
+  scope: JobScope;
+  user: IUser;
+  serverName: string;
+  reference: string;
+  toolName: LookupTool;
+  invoke: () => Promise<FormattedToolResponse>;
+  signal?: AbortSignal;
+}): Promise<FormattedToolResponse> {
+  const [conversation, binding] = await Promise.all([
+    deps.getConvo(scope.userId, scope.conversationId),
+    deps.findJob(scope, bindingKey(serverName, reference)),
+  ]).catch(() => [undefined, undefined] as const);
+  if (conversation === undefined) return lookupError(toolName, 'backend_unavailable');
+  if (signal?.aborted || !binding || !conversationAvailable(conversation, user)) {
+    return lookupError(toolName, 'job_unavailable');
+  }
+  const result = await invoke();
+  if (toolName === 'get_media_job_status' || isMCPToolResultError(result)) return result;
+  const ready = resultSchema.safeParse(parseResult(result[0])).data;
+  if (!ready) return [result[0], undefined];
+  if (signal?.aborted || ready.job_reference !== reference) {
+    return lookupError(toolName, 'job_unavailable');
+  }
+  try {
+    const config = await deps.getAppConfig({
+      userId: scope.userId,
+      role: user.role,
+      tenantId: scope.tenantId,
+    });
+    if (!config) return storageFailed(reference);
+    if (signal?.aborted || !conversationAvailable(conversation, user)) {
+      return lookupError(toolName, 'job_unavailable');
+    }
+    return await storeResult(
+      result,
+      ready,
+      {
+        user,
+        config,
+        conversationId: scope.conversationId,
+        messageId: binding.messageId,
+        fileId: binding.fileId,
+        toolCallId: binding.toolCallId,
+      },
+      deps.saveImage,
+    );
+  } catch (error) {
+    if (error instanceof Error && error.message === 'image_target_unavailable') {
+      return lookupError(toolName, 'job_unavailable');
+    }
+    return storageFailed(reference);
+  }
+}
+
+/** Retrieve an accepted job in server scope after the originating request ends. */
+export function createMCPImagePickup({
+  deps,
+  intervalMs = PICKUP_INTERVAL_MS,
+}: {
+  deps: LookupDependencies & {
+    runWithScope: <T>(scope: JobScope, action: () => Promise<T>) => Promise<T>;
+    getUser: (userId: string) => Promise<IUser | null>;
+    canUseServers: (user: IUser) => Promise<boolean>;
+    getServerConfigs: (userId: string, user: IUser) => Promise<Record<string, ParsedServerConfig>>;
+    getManager: (userId: string) => Parameters<AgentMCPToolInvoker>[0];
+    getFlowManager: () => Parameters<AgentMCPToolInvoker>[1]['flowManager'];
+  };
+  intervalMs?: number;
+}): (pickup: Pickup) => void {
+  const active = new Set<string>();
+  const toolName = 'get_media_result';
+  return (pickup) => {
+    const { userId, tenantId, conversationId, serverName, reference, expiresAt } = pickup;
+    const duration = Math.min(MAX_PICKUP_MS, expiresAt - Date.now());
+    if (duration <= 0) return;
+    const key = JSON.stringify([userId, tenantId, conversationId, serverName, reference]);
+    if (active.has(key)) return;
+    active.add(key);
+    const signal = AbortSignal.timeout(duration);
+    const scope = { userId, tenantId, conversationId };
+    const requestBody = { messageId: randomUUID() };
+
+    const poll = async () => {
+      while (!signal.aborted) {
+        const result = await deps
+          .runWithScope(scope, async () => {
+            const row = await deps.getUser(userId);
+            if (!row || (row.tenantId ?? null) !== (tenantId ?? null)) {
+              return lookupError(toolName, 'job_unavailable');
+            }
+            const user = Object.assign(row, { id: userId });
+            if (!(await deps.canUseServers(user))) return lookupError(toolName, 'job_unavailable');
+            return lookupImageJob({
+              deps,
+              scope,
+              user,
+              serverName,
+              reference,
+              toolName,
+              signal,
+              invoke: async () => {
+                const configs = await deps.getServerConfigs(userId, user);
+                const serverConfig = Object.prototype.hasOwnProperty.call(configs, serverName)
+                  ? configs[serverName]
+                  : undefined;
+                if (!serverConfig || signal.aborted)
+                  return lookupError(toolName, 'job_unavailable');
+                return deps.getManager(userId).callTool({
+                  user,
+                  serverName,
+                  serverConfig,
+                  toolName,
+                  provider: 'openai',
+                  toolArguments: { job_reference: reference },
+                  requestBody,
+                  nativeImageResult: true,
+                  unattended: true,
+                  options: { signal },
+                  flowManager: deps.getFlowManager(),
+                });
+              },
+            });
+          })
+          .catch(() => lookupError(toolName, 'backend_unavailable'));
+        const status = statusSchema.safeParse(parseResult(result[0])).data?.status;
+        if (!status || !pickupRetryStatuses.has(status)) return;
+        await setTimeout(intervalMs, undefined, { signal, ref: false });
+      }
+    };
+
+    // Start without the chat's abort signal, request-scoped connections or OAuth callbacks.
+    void poll()
+      .catch(() => undefined)
+      .finally(() => active.delete(key));
+  };
+}
+
 /** Bind the existing job to its original response and store native images in the host. */
 export function createMCPImageInvoker({
   invokeTool,
   deps,
+  enqueuePickup,
 }: {
   invokeTool: AgentMCPToolInvoker;
   deps: Dependencies;
+  enqueuePickup?: (pickup: Pickup) => void;
 }): (
   manager: Parameters<AgentMCPToolInvoker>[0],
   invocation: Parameters<AgentMCPToolInvoker>[1],
@@ -202,50 +380,23 @@ export function createMCPImageInvoker({
     const getConfig = () =>
       scope &&
       deps.getAppConfig({ userId: scope.userId, role: user?.role, tenantId: scope.tenantId });
-    const bindingKey = (reference: string) => JSON.stringify([serverName, reference]);
     if (lookup) {
       const args = lookupSchema.safeParse(invocation.toolArguments);
       if (!args.success) return lookupError(toolName, 'invalid_parameters');
       if (!scope || !user) return lookupError(toolName, 'job_unavailable');
-      const reference = args.data.job_reference;
-      const [conversation, binding] = await Promise.all([
-        deps.getConvo(scope.userId, scope.conversationId),
-        deps.findJob(scope, bindingKey(reference)),
-      ]).catch(() => [undefined, undefined] as const);
-      if (conversation === undefined) return lookupError(toolName, 'backend_unavailable');
-      if (!binding || !conversationAvailable(conversation, user)) {
-        return lookupError(toolName, 'job_unavailable');
-      }
-      const result = await invokeTool(manager, {
-        ...invocation,
-        nativeImageResult: toolName === 'get_media_result',
+      return lookupImageJob({
+        deps,
+        scope,
+        user,
+        serverName,
+        reference: args.data.job_reference,
+        toolName,
+        invoke: () =>
+          invokeTool(manager, {
+            ...invocation,
+            nativeImageResult: toolName === 'get_media_result',
+          }),
       });
-      if (toolName === 'get_media_job_status' || isMCPToolResultError(result)) return result;
-      const ready = resultSchema.safeParse(parseResult(result[0])).data;
-      if (!ready) return [result[0], undefined];
-      if (ready.job_reference !== reference) return lookupError(toolName, 'job_unavailable');
-      try {
-        const config = await getConfig();
-        if (!config) return storageFailed(reference);
-        return await storeResult(
-          result,
-          ready,
-          {
-            user,
-            config,
-            conversationId: scope.conversationId,
-            messageId: binding.messageId,
-            fileId: binding.fileId,
-            toolCallId: binding.toolCallId,
-          },
-          deps.saveImage,
-        );
-      } catch (error) {
-        if (error instanceof Error && error.message === 'image_target_unavailable') {
-          return lookupError(toolName, 'job_unavailable');
-        }
-        return storageFailed(reference);
-      }
     }
 
     const callId =
@@ -308,13 +459,27 @@ export function createMCPImageInvoker({
       if (
         !(await deps.bindJob(
           { ...scope, messageId },
-          { key: bindingKey(reference), fileId, toolCallId },
+          { key: bindingKey(serverName, reference), fileId, toolCallId },
         ))
       ) {
         return storageFailed(reference);
       }
+      if (isMCPToolResultError(result)) return result;
+      const pickup = pickupSchema.safeParse(data).data;
+      if (pickup) {
+        enqueuePickup?.({
+          ...scope,
+          serverName,
+          reference,
+          expiresAt: Math.min(
+            pickup.pickup_expires_at,
+            conversation.expiredAt?.getTime() ?? Infinity,
+          ),
+        });
+        return result;
+      }
       const ready = resultSchema.safeParse(data).data;
-      if (!ready || isMCPToolResultError(result)) return result;
+      if (!ready) return result;
       return await storeResult(
         result,
         ready,
