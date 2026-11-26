@@ -11,7 +11,12 @@ function harness(preserveOriginal: boolean) {
   type Message = NonNullable<Awaited<ReturnType<ImageStorageDependencies['getMessage']>>>;
   const files = new Map<string, File>();
   const buffers = new Map<string, Buffer>();
-  const message: Message = { conversationId: 'conversation', isCreatedByUser: false, files: [] };
+  const message: Message = {
+    conversationId: 'conversation',
+    isCreatedByUser: false,
+    files: [],
+    attachments: [],
+  };
   const state = { attach: true, saveDisplay: true, messageAvailable: true };
   const config = { fileConfig: { imageGeneration: { preserveOriginal } } } as AppConfig;
   const deps: ImageStorageDependencies = {
@@ -20,7 +25,10 @@ function harness(preserveOriginal: boolean) {
     findFileById: async (id) => files.get(id) ?? null,
     attachMCPImage: async (_target, image) => {
       if (!state.attach) return false;
-      message.files?.push(image);
+      if (!message.files?.some((file) => (file as typeof image).file_id === image.file_id)) {
+        message.files?.push(image);
+      }
+      message.attachments?.push(image);
       return true;
     },
     savePreparedImage: async (image, options) => {
@@ -150,6 +158,18 @@ it('requires the native attachment update before confirming and reuses files on 
   await h.save(input);
   expect(h.message.files).toHaveLength(1);
   expect(h.files.size).toBe(1);
+});
+
+it('restores a missing attachment using the already linked image, without writing any file', async () => {
+  const h = harness(false);
+  const input = await pixels().png().toBuffer();
+  const display = await h.save(input);
+  h.message.attachments = [];
+  expect(await h.save(await pixels().negate().png().toBuffer())).toEqual(display);
+  expect(h.message.attachments).toEqual([display]);
+  expect(h.message.files).toEqual([display]);
+  expect(h.files.size).toBe(2);
+  expect(h.buffers.get(h.fileId)).toEqual(input);
 });
 
 it('derives a missing display from the stored original after a partial failure', async () => {

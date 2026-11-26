@@ -385,8 +385,8 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
               conversationId,
               messageId,
               text: 'Final answer',
-              files: [],
-              attachments: [],
+              files: scenario === 'closed' ? null : [],
+              attachments: scenario === 'closed' ? null : [],
               isCreatedByUser: false,
             },
           );

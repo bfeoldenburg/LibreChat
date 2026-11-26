@@ -86,3 +86,58 @@ it('keeps both links and attaches only the display to the verified LibreChat mes
     expect(await files.findFileById('original')).toMatchObject({ user, ...association });
   });
 });
+
+it.each(['missing', 'files-only'])(
+  'attaches a saved image when the legacy attachment array is null (%s)',
+  async (scenario) => {
+    const messages = createMessageMethods(mongoose);
+    const userId = String(new mongoose.Types.ObjectId());
+    const target = {
+      userId,
+      conversationId: 'image-legacy-thread',
+      messageId: scenario,
+      toolCallId: 'generate',
+    };
+    const image = {
+      user: userId,
+      file_id: 'display',
+      filename: 'image.png',
+      filepath: '/images/display.png',
+      type: 'image/png',
+      object: 'file' as const,
+      bytes: 64,
+      usage: 0,
+      embedded: false,
+      width: 2048,
+      height: 2048,
+      source: FileSources.local,
+      metadata: { mcpImage: true, imageOriginalFileId: 'original' },
+    };
+    await mongoose.models.Message.create({
+      user: userId,
+      conversationId: target.conversationId,
+      messageId: target.messageId,
+      isCreatedByUser: false,
+      files: scenario === 'files-only' ? [image] : null,
+      attachments: null,
+      mcpImagePickups: [{ toolCallId: target.toolCallId, expiresAt: Date.now() + 1000 }],
+    });
+    const writes = await Promise.all([
+      messages.attachMCPImage(target, image, 'original'),
+      messages.attachMCPImage(target, image, 'original'),
+    ]);
+    expect(writes.sort()).toEqual([false, true]);
+    expect(await messages.getMessage({ user: userId, messageId: target.messageId })).toMatchObject({
+      files: [image],
+      attachments: [
+        {
+          ...image,
+          conversationId: target.conversationId,
+          messageId: target.messageId,
+          toolCallId: target.toolCallId,
+        },
+      ],
+      mcpImagePickups: [],
+    });
+  },
+);

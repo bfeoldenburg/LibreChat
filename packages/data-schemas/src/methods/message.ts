@@ -4368,26 +4368,59 @@ export function createMessageMethods(
     originalFileId: string,
   ) {
     const Message = mongoose.models.Message as Model<IMessage>;
+    // Repair a partial write and treat legacy null arrays as empty in the same update.
+    const missingImage = (field: 'files' | 'attachments') => ({
+      [`${field}.file_id`]: { $nin: [originalFileId, image.file_id] },
+      [`${field}.metadata.imageOriginalFileId`]: { $ne: originalFileId },
+    });
+    const attachment = {
+      ...image,
+      conversationId: target.conversationId,
+      messageId: target.messageId,
+      toolCallId: target.toolCallId,
+    };
+    const appendImage = (field: 'files' | 'attachments', value: ImageFile) => ({
+      $let: {
+        vars: { entries: { $ifNull: [`$${field}`, []] } },
+        in: {
+          $cond: [
+            {
+              $or: [
+                { $in: [image.file_id, '$$entries.file_id'] },
+                { $in: [originalFileId, '$$entries.file_id'] },
+                { $in: [originalFileId, '$$entries.metadata.imageOriginalFileId'] },
+              ],
+            },
+            '$$entries',
+            { $concatArrays: ['$$entries', { $literal: [value] }] },
+          ],
+        },
+      },
+    });
     const result = await Message.updateOne(
       {
         ...imageMessageFilter(target, 'attachMCPImage'),
         messageId: target.messageId,
-        'files.file_id': { $ne: originalFileId },
-        'files.metadata.imageOriginalFileId': { $ne: originalFileId },
+        $or: [missingImage('files'), missingImage('attachments')],
       },
-      {
-        $push: {
-          files: image,
-          attachments: {
-            ...image,
-            conversationId: target.conversationId,
-            messageId: target.messageId,
-            toolCallId: target.toolCallId,
+      [
+        {
+          $set: {
+            files: appendImage('files', image),
+            attachments: appendImage('attachments', attachment),
+            ...(target.toolCallId && {
+              mcpImagePickups: {
+                $filter: {
+                  input: { $ifNull: ['$mcpImagePickups', []] },
+                  as: 'pickup',
+                  cond: { $ne: ['$$pickup.toolCallId', { $literal: target.toolCallId }] },
+                },
+              },
+            }),
+            __v: { $add: [{ $ifNull: ['$__v', 0] }, 1] },
           },
         },
-        ...(target.toolCallId && { $pull: { mcpImagePickups: { toolCallId: target.toolCallId } } }),
-        $inc: { __v: 1 },
-      },
+      ],
     );
     return result.modifiedCount === 1;
   }

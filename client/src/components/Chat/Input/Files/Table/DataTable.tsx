@@ -159,7 +159,7 @@ export default function DataTable<TData, TValue>({ columns, data }: DataTablePro
       </div>
       <div
         ref={scrollRef}
-        className="relative grid h-full max-h-[calc(100vh-20rem)] min-h-[calc(100vh-20rem)] w-full flex-1 overflow-hidden overflow-x-auto overflow-y-auto rounded-md"
+        className="relative h-full max-h-[calc(100vh-20rem)] min-h-[calc(100vh-20rem)] w-full flex-1 overflow-auto rounded-md"
       >
         {/* Unwrapped: this div is the scroller the virtualizer observes, so the table
             must not add its own scrolling wrapper inside it. */}
@@ -245,7 +245,7 @@ export default function DataTable<TData, TValue>({ columns, data }: DataTablePro
               </>
             ) : (
               <TableRow>
-                <TableCell colSpan={columns.length} className="h-24 text-center">
+                <TableCell colSpan={visibleColumnCount} className="h-24 text-center">
                   {localize('com_files_no_results')}
                 </TableCell>
               </TableRow>

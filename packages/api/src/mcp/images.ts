@@ -63,6 +63,7 @@ export interface ImageStorageDependencies {
     | 'isTemporary'
     | 'expiredAt'
     | 'files'
+    | 'attachments'
   > | null>;
   findFileById: (id: string) => Promise<ImportFile | null>;
   attachMCPImage: (target: Target, image: ImageFile, originalFileId: string) => Promise<boolean>;
@@ -227,13 +228,23 @@ async function store(
     throw new Error('image_target_unavailable');
   }
 
-  const displayId = attachedDisplayId(message.files, fileId);
+  const attachDisplay = async (display: ImportFile) => {
+    const image = asMCPImageFile(display);
+    await fence();
+    if (!(await deps.attachMCPImage(target, image, fileId))) {
+      throw new Error('image_target_unavailable');
+    }
+    return image;
+  };
+  const messageFileId = attachedDisplayId(message.files, fileId);
+  const attachmentId = attachedDisplayId(message.attachments, fileId);
+  const displayId = attachmentId ?? messageFileId;
   if (displayId) {
     const display = displayId === fileId ? existing : await deps.findFileById(displayId);
     if (!existing || !display) throw new Error('image_file_unavailable');
     checkFile(existing, target, tenantId);
     checkFile(display, target, tenantId);
-    return asMCPImageFile(display);
+    return attachmentId && messageFileId ? asMCPImageFile(display) : attachDisplay(display);
   }
 
   const req = {
@@ -299,11 +310,7 @@ async function store(
       displayFile = saved;
     }
   }
-  await fence();
-  if (!(await deps.attachMCPImage(target, asMCPImageFile(displayFile), fileId))) {
-    throw new Error('image_target_unavailable');
-  }
-  return asMCPImageFile(displayFile);
+  return attachDisplay(displayFile);
 }
 
 export interface ImageStorageInput {

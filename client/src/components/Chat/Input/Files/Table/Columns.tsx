@@ -1,20 +1,23 @@
 /* eslint-disable react-hooks/rules-of-hooks */
 import { FileSources, FileContext } from 'librechat-data-provider';
-import { ArrowUpDown, ArrowUp, ArrowDown, Database } from 'lucide-react';
 import { ImagePreview, FilePreview, getFileType } from '@librechat/chat/components';
+import { ArrowUpDown, ArrowUp, ArrowDown, ArrowDownToLine, Database } from 'lucide-react';
 import {
   Button,
   Checkbox,
+  Spinner,
   useMediaQuery,
   TooltipAnchor,
+  useToastContext,
   AzureMinimalIcon,
   OpenAIMinimalIcon,
 } from '@librechat/client';
 import type { ColumnDef } from '@tanstack/react-table';
 import type { TFile } from 'librechat-data-provider';
-import { TranslationKeys, useLocalize } from '~/hooks';
+import { formatDate, getDownloadFilename, triggerDownload } from '~/utils';
+import { TranslationKeys, useAuthContext, useLocalize } from '~/hooks';
 import { SortFilterHeader } from './SortFilterHeader';
-import { formatDate } from '~/utils';
+import { useFileDownload } from '~/data-provider';
 
 const contextMap: Record<any, TranslationKeys> = {
   [FileContext.avatar]: 'com_ui_avatar',
@@ -25,6 +28,48 @@ const contextMap: Record<any, TranslationKeys> = {
   [FileContext.message_attachment]: 'com_ui_attachment',
   [FileContext.run_artifact]: 'com_ui_published_file',
 };
+
+function DownloadFileButton({ file }: { file: TFile }) {
+  const { user } = useAuthContext();
+  const { showToast } = useToastContext();
+  const localize = useLocalize();
+  const label = localize('com_ui_download');
+  const { refetch, isFetching } = useFileDownload(user?.id, file.file_id, { source: file.source });
+
+  const download = async () => {
+    const { data, isError } = await refetch();
+    if (isError || !data) {
+      showToast({ status: 'error', message: localize('com_ui_download_error') });
+      return;
+    }
+    triggerDownload(data, getDownloadFilename(file.filename, file.file_id, file.source));
+  };
+
+  return (
+    <TooltipAnchor
+      description={label}
+      render={
+        <Button
+          type="button"
+          variant="ghost"
+          size="compact"
+          className="whitespace-nowrap"
+          aria-label={`${label} ${file.filename}`}
+          aria-busy={isFetching}
+          disabled={!user?.id || isFetching}
+          onClick={download}
+        >
+          {isFetching ? (
+            <Spinner className="size-4" aria-hidden="true" />
+          ) : (
+            <ArrowDownToLine className="size-4" aria-hidden="true" />
+          )}
+          <span className="hidden sm:inline">{label}</span>
+        </Button>
+      }
+    />
+  );
+}
 
 export const columns: ColumnDef<TFile>[] = [
   {
@@ -126,6 +171,17 @@ export const columns: ColumnDef<TFile>[] = [
         </div>
       );
     },
+  },
+  {
+    id: 'download',
+    size: 48,
+    enableHiding: false,
+    enableSorting: false,
+    header: () => {
+      const localize = useLocalize();
+      return <span className="sr-only">{localize('com_ui_download')}</span>;
+    },
+    cell: ({ row }) => <DownloadFileButton file={row.original} />,
   },
   {
     accessorKey: 'updatedAt',
