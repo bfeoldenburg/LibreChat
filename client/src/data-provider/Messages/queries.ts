@@ -17,7 +17,7 @@ import {
   isNotFoundError,
   logger,
 } from '~/utils';
-import { pendingMCPImages } from '~/utils/mcpImages';
+import { isNativeMCPImage, pendingMCPImages } from '~/utils/mcpImages';
 
 type StableMessagesParams = {
   pathname: string;
@@ -284,6 +284,27 @@ export async function loadConversationMessages(
       result,
       currentMessages,
     );
+  }
+
+  if (stableMessages === result && currentMessages != null) {
+    const previousFileIds = new Set<string>();
+    for (const message of currentMessages) {
+      for (const attachment of message.attachments ?? []) {
+        if ('file_id' in attachment) previousFileIds.add(attachment.file_id);
+      }
+    }
+    const hasNewMCPImage = result.some((message) =>
+      message.attachments?.some(
+        (attachment) =>
+          'file_id' in attachment &&
+          !previousFileIds.has(attachment.file_id) &&
+          isNativeMCPImage(attachment),
+      ),
+    );
+    if (hasNewMCPImage) {
+      // The attachment can be a display version. The file list also includes its original.
+      void queryClient.invalidateQueries({ queryKey: [QueryKeys.files] });
+    }
   }
 
   completeMessagesReplyFetch(queryClient, id, request, stableMessages === result);

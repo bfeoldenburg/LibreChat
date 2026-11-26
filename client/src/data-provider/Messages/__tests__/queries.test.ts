@@ -5,10 +5,11 @@ import { Constants, ContentTypes, QueryKeys, dataService } from 'librechat-data-
 import {
   QueryClient,
   focusManager,
+  useQuery,
   useQueryClient,
   QueryClientProvider,
 } from '@tanstack/react-query';
-import type { TMessage } from 'librechat-data-provider';
+import type { TFile, TMessage } from 'librechat-data-provider';
 import type { ReactNode } from 'react';
 import {
   useCachedMessages,
@@ -687,9 +688,11 @@ describe('background MCP image delivery in an open chat', () => {
         messageId,
         toolCallId,
         conversationId: chatId,
-        filename: 'image.png',
+        filename: 'image-display.png',
         filepath: '/images/image.png',
+        metadata: { mcpImage: true, imageOriginalFileId: 'original-id' },
       };
+      const original = { file_id: 'original-id', filename: 'image-original.png' };
       const pending = { ...reply, mcpImagePickups: [{ toolCallId, expiresAt }] };
       const settled = {
         ...reply,
@@ -699,17 +702,26 @@ describe('background MCP image delivery in an open chat', () => {
       const get = jest.mocked(dataService.getMessagesByConvoId);
       get.mockReset().mockResolvedValueOnce([pending]).mockResolvedValue([settled]);
       queryClient.setQueryData([QueryKeys.messages, chatId], [reply]);
+      const getFiles = jest.fn().mockResolvedValue([attachment, original]);
+      queryClient.setQueryData([QueryKeys.files], []);
+      queryClient.setQueryData([QueryKeys.files, 'recent', 4], []);
 
       const { result, rerender, unmount } = renderHook(
-        ({ isStreaming }) =>
-          useGetMessagesByConvoId(
+        ({ isStreaming }) => {
+          const files = useQuery<TFile[]>([QueryKeys.files], getFiles, { refetchOnMount: false });
+          const recent = useQuery<TFile[]>([QueryKeys.files, 'recent', 4], getFiles, {
+            refetchOnMount: false,
+          });
+          const messages = useGetMessagesByConvoId(
             chatId,
             {
               refetchInterval: isStreaming ? false : mcpImagePickupRefetchInterval,
               refetchIntervalInBackground: false,
             },
             { isStreaming },
-          ),
+          );
+          return { messages: messages.data, files: files.data, recent: recent.data };
+        },
         {
           initialProps: { isStreaming: true },
           wrapper: createWrapper(queryClient, `/c/${chatId}`),
@@ -720,12 +732,24 @@ describe('background MCP image delivery in an open chat', () => {
         expect(get).not.toHaveBeenCalled();
         rerender({ isStreaming: false });
         await act(() => jest.advanceTimersByTimeAsync(5_001));
-        await waitFor(() => expect(result.current.data).toEqual([pending]));
+        await waitFor(() => expect(result.current.messages).toEqual([pending]));
+        expect(getFiles).not.toHaveBeenCalled();
         await act(() => jest.advanceTimersByTimeAsync(5_001));
-        await waitFor(() => expect(result.current.data).toEqual([settled]));
-        expect(result.current.data?.[0]?.attachments).toEqual(stored ? [attachment] : undefined);
+        await waitFor(() => expect(result.current.messages).toEqual([settled]));
+        expect(result.current.messages?.[0]?.attachments).toEqual(
+          stored ? [attachment] : undefined,
+        );
+        const listed = stored ? [attachment, original] : [];
+        await waitFor(() => {
+          expect(result.current.files).toEqual(listed);
+          expect(result.current.recent).toEqual(listed);
+        });
         await act(() => jest.advanceTimersByTimeAsync(10_000));
         expect(get).toHaveBeenCalledTimes(2);
+        await act(async () => {
+          await queryClient.refetchQueries([QueryKeys.messages, chatId]);
+        });
+        expect(getFiles).toHaveBeenCalledTimes(stored ? 2 : 0);
       } finally {
         unmount();
         queryClient.clear();

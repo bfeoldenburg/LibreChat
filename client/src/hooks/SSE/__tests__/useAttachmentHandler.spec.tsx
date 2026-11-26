@@ -15,9 +15,9 @@
  */
 
 import { RecoilRoot } from 'recoil';
-import { Tools } from 'librechat-data-provider';
 import { QueryClient } from '@tanstack/react-query';
 import { renderHook, act } from '@testing-library/react';
+import { QueryKeys, Tools } from 'librechat-data-provider';
 import { Provider as JotaiProvider, useAtomValue } from 'jotai';
 import type {
   TFile,
@@ -26,8 +26,8 @@ import type {
   TAttachmentMetadata,
 } from 'librechat-data-provider';
 import type { ReactNode } from 'react';
+import useAttachmentHandler, { updateAttachmentCaches } from '../useAttachmentHandler';
 import { messageAttachmentsMapAtom } from '~/hooks/SSE/atoms';
-import useAttachmentHandler from '../useAttachmentHandler';
 
 type AttachmentFixture = TFile & TAttachmentMetadata;
 
@@ -91,6 +91,26 @@ function setup() {
 }
 
 describe('useAttachmentHandler upsert-by-file_id', () => {
+  it('invalidates the file lists when a native MCP image is streamed', () => {
+    const queryClient = new QueryClient();
+    const filesKey = [QueryKeys.files];
+    const recentKey = [QueryKeys.files, 'recent', 4];
+    queryClient.setQueryData(filesKey, []);
+    queryClient.setQueryData(recentKey, []);
+
+    updateAttachmentCaches(
+      queryClient,
+      makeAttachment({
+        filepath: '/images/image-display.png',
+        metadata: { mcpImage: true, imageOriginalFileId: 'original-id' },
+      }),
+    );
+
+    expect(queryClient.getQueryState(filesKey)).toMatchObject({ data: [], isInvalidated: true });
+    expect(queryClient.getQueryState(recentKey)).toMatchObject({ data: [], isInvalidated: true });
+    queryClient.clear();
+  });
+
   it('appends a new attachment when no record with the same file_id exists', () => {
     const ctx = setup();
     ctx.handle(makeAttachment({ status: 'pending' }));

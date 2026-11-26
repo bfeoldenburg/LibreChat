@@ -210,7 +210,7 @@ export default function FileGrid({
   emptyText,
 }: FileGridProps) {
   const localize = useLocalize();
-  const library = useGetFiles<TFile[]>({ enabled: source == null });
+  const library = useGetFiles<TFile[]>({ enabled: source == null, refetchOnMount: true });
   const files = source?.files ?? library.data ?? NO_FILES;
   const isLoading = source?.isLoading ?? library.isLoading;
   const isError = source?.isError ?? library.isError;

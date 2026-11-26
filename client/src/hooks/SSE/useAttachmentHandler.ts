@@ -6,12 +6,15 @@ import type { AttachmentHandler } from '@librechat/chat/react';
 import type { QueryClient } from '@tanstack/react-query';
 import { invalidateRecentFiles } from '~/utils/files';
 import { handleMemoryArtifact } from '~/utils/memory';
+import { isNativeMCPImage } from '~/utils/mcpImages';
 
 /** Keeps the app's file, memory and preview caches in step with a streamed attachment. */
 export function updateAttachmentCaches(queryClient: QueryClient, data: TAttachment): void {
   const fileId = (data as Partial<TFile>).file_id;
   const fileData = data as TFile;
-  if (fileData?.file_id && fileData?.filepath && !fileData.filepath.includes('/api/files')) {
+  if (fileId && isNativeMCPImage(data)) {
+    void queryClient.invalidateQueries({ queryKey: [QueryKeys.files] });
+  } else if (fileData?.file_id && fileData?.filepath && !fileData.filepath.includes('/api/files')) {
     queryClient.setQueryData([QueryKeys.files], (oldData: TFile[] | undefined) => {
       if (!oldData) {
         return [fileData];

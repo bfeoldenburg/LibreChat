@@ -32,6 +32,8 @@ export function MyFilesModal({
   }, [triggerRef]);
 
   const { data: files = [] } = useGetFiles<TFile[]>({
+    enabled: open,
+    refetchOnMount: true,
     select: (files) =>
       files.map((file) => {
         file.context = file.context ?? FileContext.unknown;
