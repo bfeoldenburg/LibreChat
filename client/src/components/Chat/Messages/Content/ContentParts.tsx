@@ -25,6 +25,7 @@ import {
 import type {
   SubagentAttachmentFile,
   TMessageContentParts,
+  TMessage,
   SearchResultData,
   TAttachment,
   Agents,
@@ -49,6 +50,7 @@ import { ParallelContentRenderer, type PartWithIndex } from './ParallelContent';
 import { isPreviewedToolCallPart, PreviewedToolCallPart } from './hydration';
 import { MediaContext, MessageContext, SearchContext } from '~/Providers';
 import MemoryArtifacts, { hasMemoryArtifacts } from './MemoryArtifacts';
+import { isNativeMCPImage, pendingMCPImages } from '~/utils/mcpImages';
 import { useMCPAppsPolicy } from '~/Providers/MCPAppsPolicyContext';
 import { selectToolCallUIResources } from '~/utils/mcpApps';
 import ActivityPhaseGroup from './ActivityPhaseGroup';
@@ -58,6 +60,7 @@ import ApprovalProvider from './ApprovalContext';
 import Sources from '~/components/Web/Sources';
 import ToolCallGroup from './ToolCallGroup';
 import { blocksLiveFold } from './live';
+import MCPImages from './MCPImages';
 import Part from './Part';
 
 /** An empty TEXT part — the placeholder some endpoints seed in
@@ -399,6 +402,8 @@ type ContentPartsProps = {
   authorHeader?: ReactNode;
   conversationId?: string | null;
   attachments?: TAttachment[];
+  mcpImagePickups?: TMessage['mcpImagePickups'];
+  isUserSubmitted?: boolean;
   searchResults?: { [key: string]: SearchResultData };
   isCreatedByUser: boolean;
   showThinking: boolean;
@@ -1360,7 +1365,7 @@ const ContentPartsBody = memo(function ContentPartsBody({
 const ContentParts = memo(function ContentParts(props: ContentPartsProps) {
   const { enabled: appsEnabled } = useMCPAppsPolicy();
   const {
-    attachments,
+    attachments: allAttachments,
     messageId,
     conversationId,
     isCreatedByUser,
@@ -1368,6 +1373,13 @@ const ContentParts = memo(function ContentParts(props: ContentPartsProps) {
     isSubmitting,
     renderOwnerId,
   } = props;
+  const [attachments, nativeImages] = useMemo(() => {
+    const native = allAttachments?.filter(isNativeMCPImage) ?? [];
+    return [
+      native.length ? allAttachments?.filter((item) => !isNativeMCPImage(item)) : allAttachments,
+      native,
+    ];
+  }, [allAttachments]);
   const appRenderIdentity = useRef<{
     messageId: string;
     conversationId: string | null | undefined;
@@ -1637,11 +1649,17 @@ const ContentParts = memo(function ContentParts(props: ContentPartsProps) {
                   <SoleToolContext.Provider value={undefined}>
                     <ContentPartsBody
                       {...props}
+                      attachments={attachments}
                       resumeAuthors={props.resumeAuthors ?? messageContent.resumeAuthors}
                     />
                   </SoleToolContext.Provider>
                 </MCPAppSuppressionContext.Provider>
               )}
+              <MCPImages
+                pickups={pendingMCPImages(props, Date.now())}
+                files={nativeImages}
+                content={props.content}
+              />
             </SubagentAttachmentsContext.Provider>
           </ToolDisclosureContext.Provider>
         </ReasoningDisclosureContext.Provider>

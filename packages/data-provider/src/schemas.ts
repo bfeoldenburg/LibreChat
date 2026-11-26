@@ -967,6 +967,18 @@ export const tMessageSchema = z.object({
   userSubmittedMessageFieldPaths: z.array(userSubmittedMessageFieldPathSchema).optional(),
   isTemporary: z.boolean().optional(),
   expiredAt: z.string().nullable().optional(),
+  /** Outstanding native MCP attachments on this message, used to refresh an open chat. */
+  mcpImagePickups: z
+    .array(
+      z.object({
+        toolCallId: z.string(),
+        expiresAt: z.number(),
+        resolution: z
+          .object({ width: z.number().int().positive(), height: z.number().int().positive() })
+          .optional(),
+      }),
+    )
+    .optional(),
   error: z.boolean().optional(),
   clientTimestamp: z.string().optional(),
   createdAt: z

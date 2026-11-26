@@ -3,6 +3,7 @@ import type {
   Agent,
   TFile,
   TAttachment,
+  TMessage,
   SearchResultData,
   TMessageContentParts,
 } from 'librechat-data-provider';
@@ -51,6 +52,8 @@ export type ContentPartsSlotProps = {
   messageId: string;
   conversationId: string | null;
   attachments?: TAttachment[];
+  mcpImagePickups?: TMessage['mcpImagePickups'];
+  isUserSubmitted?: boolean;
   searchResults?: Record<string, SearchResultData>;
   authorHeader?: ReactNode;
   isSubmitting: boolean;

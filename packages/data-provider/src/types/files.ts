@@ -227,6 +227,7 @@ export type TFile = {
    */
   previewError?: string;
   metadata?: {
+    mcpImage?: boolean;
     imageOriginalFileId?: string;
     imageDisplayFileId?: string;
     runFile?: RunFileProvenance;

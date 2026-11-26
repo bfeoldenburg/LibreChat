@@ -570,6 +570,7 @@ const enqueuePickup = createMCPImagePickup({
     getServerConfigs: resolveAllMcpConfigs,
     getManager: getMCPManager,
     getFlowManager: () => getFlowStateManager(getLogStores(CacheKeys.FLOWS)),
+    settlePickup: db.settleMCPImagePickup,
   },
 });
 

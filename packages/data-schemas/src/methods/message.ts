@@ -37,6 +37,10 @@ const HITL_MESSAGE_FILTER_FIELD_SET = new Set<string>(HITL_MESSAGE_FILTER_FIELDS
 type MCPImageScope = { userId: string; conversationId: string; tenantId?: string };
 type MCPImageTarget = MCPImageScope & { messageId: string };
 type MCPImageJob = NonNullable<IMessage['mcpImageJobs']>[number];
+type MCPImageBinding = MCPImageJob & {
+  pickupExpiresAt?: number;
+  pickupResolution?: { width: number; height: number };
+};
 type MCPImageJobTarget = MCPImageJob & { messageId: string };
 
 function normalizeUserSubmittedPaths(paths: unknown): string[] {
@@ -287,8 +291,9 @@ function sanitizeMessageUpdate(update: Record<string, unknown>): Record<string, 
     Object.entries(update).filter(
       ([key, value]) =>
         value !== undefined &&
-        !['_id', 'tenantId', '__v', 'mcpImageJobs'].includes(key) &&
-        !key.startsWith('mcpImageJobs.'),
+        !['_id', 'tenantId', '__v', 'mcpImageJobs', 'mcpImagePickups'].includes(key) &&
+        !key.startsWith('mcpImageJobs.') &&
+        !key.startsWith('mcpImagePickups.'),
     ),
   );
 }
@@ -969,8 +974,9 @@ export interface MessageMethods {
     tenantId?: string;
     limitPerThread: number;
   }): Promise<ParentSubagentTaskRecord[]>;
-  bindMCPImageJob(target: MCPImageTarget, binding: MCPImageJob): Promise<boolean>;
+  bindMCPImageJob(target: MCPImageTarget, binding: MCPImageBinding): Promise<boolean>;
   findMCPImageJob(scope: MCPImageScope, key: string): Promise<MCPImageJobTarget | null>;
+  settleMCPImagePickup(target: MCPImageTarget & { toolCallId: string }): Promise<void>;
   attachMCPImage(
     target: MCPImageTarget & { toolCallId?: string },
     image: ImageFile,
@@ -4303,7 +4309,10 @@ export function createMessageMethods(
     };
   }
 
-  async function bindMCPImageJob(target: MCPImageTarget, binding: MCPImageJob): Promise<boolean> {
+  async function bindMCPImageJob(
+    target: MCPImageTarget,
+    { pickupExpiresAt, pickupResolution, ...binding }: MCPImageBinding,
+  ): Promise<boolean> {
     const Message = mongoose.models.Message as Model<IMessage>;
     const result = await Message.updateOne(
       {
@@ -4313,7 +4322,18 @@ export function createMessageMethods(
           $not: { $elemMatch: { key: binding.key, fileId: { $ne: binding.fileId } } },
         },
       },
-      { $addToSet: { mcpImageJobs: binding } },
+      {
+        $addToSet: {
+          mcpImageJobs: binding,
+          ...(pickupExpiresAt != null && {
+            mcpImagePickups: {
+              toolCallId: binding.toolCallId,
+              expiresAt: pickupExpiresAt,
+              ...(pickupResolution && { resolution: pickupResolution }),
+            },
+          }),
+        },
+      },
       { timestamps: false },
     );
     return result.matchedCount === 1;
@@ -4330,6 +4350,15 @@ export function createMessageMethods(
     ).lean<Pick<IMessage, 'messageId' | 'mcpImageJobs'>>();
     const binding = row?.mcpImageJobs?.[0];
     return row && binding ? { messageId: row.messageId, ...binding } : null;
+  }
+
+  async function settleMCPImagePickup(target: MCPImageTarget & { toolCallId: string }) {
+    const Message = mongoose.models.Message as Model<IMessage>;
+    await Message.updateOne(
+      { ...imageMessageFilter(target, 'settleMCPImagePickup'), messageId: target.messageId },
+      { $pull: { mcpImagePickups: { toolCallId: target.toolCallId } } },
+      { timestamps: false },
+    );
   }
 
   /** Adds one native display file and its renderable attachment to the same message. */
@@ -4356,6 +4385,7 @@ export function createMessageMethods(
             toolCallId: target.toolCallId,
           },
         },
+        ...(target.toolCallId && { $pull: { mcpImagePickups: { toolCallId: target.toolCallId } } }),
         $inc: { __v: 1 },
       },
     );
@@ -4607,6 +4637,7 @@ export function createMessageMethods(
     getMessage,
     bindMCPImageJob,
     findMCPImageJob,
+    settleMCPImagePickup,
     attachMCPImage,
     getBranchLinks,
     getMessagesByCursor,

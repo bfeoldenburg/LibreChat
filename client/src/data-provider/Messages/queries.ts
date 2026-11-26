@@ -17,6 +17,7 @@ import {
   isNotFoundError,
   logger,
 } from '~/utils';
+import { pendingMCPImages } from '~/utils/mcpImages';
 
 type StableMessagesParams = {
   pathname: string;
@@ -93,6 +94,12 @@ export function shouldPreserveMessagesOnNotFound({
  */
 export function fetchConversationMessages(conversationId: string): Promise<t.TMessage[]> {
   return dataService.getMessagesByConvoId(conversationId, { toolPreviews: true });
+}
+
+/** A final stream frame may still precede the native attachment's database write. */
+export function mcpImagePickupRefetchInterval(messages: t.TMessage[] | undefined): number | false {
+  const now = Date.now();
+  return messages?.some((message) => pendingMCPImages(message, now).length > 0) ? 5_000 : false;
 }
 
 /**

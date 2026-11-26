@@ -145,6 +145,19 @@ const messageSchema: Schema<IMessage> = new Schema(
       default: undefined,
       select: false,
     },
+    mcpImagePickups: {
+      type: [
+        new Schema(
+          {
+            toolCallId: String,
+            expiresAt: Number,
+            resolution: { type: new Schema({ width: Number, height: Number }, { _id: false }) },
+          },
+          { _id: false },
+        ),
+      ],
+      default: undefined,
+    },
     content: {
       type: [{ type: mongoose.Schema.Types.Mixed }],
       default: undefined,

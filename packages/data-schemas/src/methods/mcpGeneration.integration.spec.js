@@ -270,6 +270,7 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
             getServerConfigs: async () => ({ 'bfe-medien': { type: 'streamable-http' } }),
             getManager: () => pickupManager,
             getFlowManager: () => ({}),
+            settlePickup: messages.settleMCPImagePickup,
             saveImage: async (input) => (pickedUp = await imageJobs.saveImage(input)),
           },
           intervalMs: 60,
@@ -319,6 +320,17 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
           context,
         );
         const started = JSON.parse(running);
+        if (scenario !== 'manual') {
+          expect(await messages.getMessage({ user: OWNER, messageId })).toMatchObject({
+            mcpImagePickups: [
+              {
+                toolCallId: context.toolCallId,
+                expiresAt: started.pickup_expires_at,
+                resolution: started.resolution,
+              },
+            ],
+          });
+        }
         const backendState = async () =>
           (await fetch(`http://127.0.0.1:${port}/test-state`)).json();
         const initialStatus =
@@ -400,6 +412,10 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
           expect(isMCPToolResultError(unavailable)).toBe(true);
           expect(JSON.parse(unavailable[0]).status).toBe('job_unavailable');
           expect(await mongoose.models.File.countDocuments()).toBe(0);
+          await waitFor(async () => {
+            const row = await messages.getMessage({ user: OWNER, messageId });
+            return row?.mcpImagePickups?.length === 0;
+          }, 'the settled pickup was still advertised');
           expect(await backendState()).toEqual({ jobs: 1, submissions: 1, translations: 1 });
           return;
         }
@@ -475,6 +491,7 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
         // A stale final/disconnect snapshot cannot erase the display attachment.
         await saveOriginal();
         const [saved] = await reopen();
+        if (scenario !== 'manual') expect(saved.mcpImagePickups).toEqual([]);
         expect(saved).not.toHaveProperty('mcpImageJobs');
         expect(saved?.files).toEqual([
           expect.objectContaining({

@@ -24,9 +24,16 @@ type ResultTarget = {
 };
 type JobScope = { userId: string; tenantId?: string; conversationId: string };
 type JobBinding = { key: string; fileId: string; toolCallId: string };
-type Pickup = JobScope & { serverName: string; reference: string; expiresAt: number };
+type PickupTarget = JobScope & { messageId: string; toolCallId: string };
+type Pickup = PickupTarget & { serverName: string; reference: string; expiresAt: number };
 type Dependencies = {
-  bindJob: (target: JobScope & { messageId: string }, binding: JobBinding) => Promise<boolean>;
+  bindJob: (
+    target: JobScope & { messageId: string },
+    binding: JobBinding & {
+      pickupExpiresAt?: number;
+      pickupResolution?: { width: number; height: number };
+    },
+  ) => Promise<boolean>;
   findJob: (scope: JobScope, key: string) => Promise<(JobBinding & { messageId: string }) | null>;
   saveMessage: (
     context: {
@@ -78,6 +85,10 @@ const pickupSchema = z.object({
   status: z.enum(['queued', 'running']),
   acceptance: z.literal('confirmed'),
   pickup_expires_at: z.number().int().positive(),
+  resolution: z
+    .object({ width: z.number().int().positive(), height: z.number().int().positive() })
+    .optional()
+    .catch(undefined),
 });
 const statusSchema = z.object({ status: z.string() });
 const pickupRetryStatuses = new Set([
@@ -281,13 +292,23 @@ export function createMCPImagePickup({
     getServerConfigs: (userId: string, user: IUser) => Promise<Record<string, ParsedServerConfig>>;
     getManager: (userId: string) => Parameters<AgentMCPToolInvoker>[0];
     getFlowManager: () => Parameters<AgentMCPToolInvoker>[1]['flowManager'];
+    settlePickup: (target: PickupTarget) => Promise<void>;
   };
   intervalMs?: number;
 }): (pickup: Pickup) => void {
   const active = new Set<string>();
   const toolName = 'get_media_result';
   return (pickup) => {
-    const { userId, tenantId, conversationId, serverName, reference, expiresAt } = pickup;
+    const {
+      userId,
+      tenantId,
+      conversationId,
+      messageId,
+      toolCallId,
+      serverName,
+      reference,
+      expiresAt,
+    } = pickup;
     const duration = Math.min(MAX_PICKUP_MS, expiresAt - Date.now());
     if (duration <= 0) return;
     const key = JSON.stringify([userId, tenantId, conversationId, serverName, reference]);
@@ -347,8 +368,16 @@ export function createMCPImagePickup({
 
     // Start without the chat's abort signal, request-scoped connections or OAuth callbacks.
     void poll()
-      .catch(() => undefined)
-      .finally(() => active.delete(key));
+      .finally(async () => {
+        try {
+          await deps.runWithScope(scope, () =>
+            deps.settlePickup({ ...scope, messageId, toolCallId }),
+          );
+        } finally {
+          active.delete(key);
+        }
+      })
+      .catch(() => undefined);
   };
 }
 
@@ -456,26 +485,32 @@ export function createMCPImageInvoker({
         return storageFailed(reference);
       }
       const fileId = imageId(callId);
+      const failed = isMCPToolResultError(result);
+      const pickup = !failed && enqueuePickup ? pickupSchema.safeParse(data).data : undefined;
+      const expiresAt =
+        pickup &&
+        Math.min(
+          pickup.pickup_expires_at,
+          conversation.expiredAt?.getTime() ?? Infinity,
+          Date.now() + MAX_PICKUP_MS,
+        );
       if (
         !(await deps.bindJob(
           { ...scope, messageId },
-          { key: bindingKey(serverName, reference), fileId, toolCallId },
+          {
+            key: bindingKey(serverName, reference),
+            fileId,
+            toolCallId,
+            ...(expiresAt != null && { pickupExpiresAt: expiresAt }),
+            ...(pickup?.resolution && { pickupResolution: pickup.resolution }),
+          },
         ))
       ) {
         return storageFailed(reference);
       }
-      if (isMCPToolResultError(result)) return result;
-      const pickup = pickupSchema.safeParse(data).data;
-      if (pickup) {
-        enqueuePickup?.({
-          ...scope,
-          serverName,
-          reference,
-          expiresAt: Math.min(
-            pickup.pickup_expires_at,
-            conversation.expiredAt?.getTime() ?? Infinity,
-          ),
-        });
+      if (failed) return result;
+      if (expiresAt != null) {
+        enqueuePickup?.({ ...scope, messageId, toolCallId, serverName, reference, expiresAt });
         return result;
       }
       const ready = resultSchema.safeParse(data).data;

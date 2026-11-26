@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { act, render, renderHook, waitFor } from '@testing-library/react';
-import { Constants, QueryKeys, dataService } from 'librechat-data-provider';
+import { Constants, ContentTypes, QueryKeys, dataService } from 'librechat-data-provider';
 import {
   QueryClient,
   focusManager,
@@ -14,6 +14,7 @@ import {
   useCachedMessages,
   getStableMessages,
   loadConversationMessages,
+  mcpImagePickupRefetchInterval,
   shouldPreserveMessagesOnNotFound,
   retryMessagesOnMount,
   refetchMessagesOnMount,
@@ -648,6 +649,102 @@ describe('useGetMessagesByConvoId', () => {
     );
 
     unmount();
+  });
+});
+
+describe('background MCP image delivery in an open chat', () => {
+  it.each([true, false])(
+    'refreshes after the stream and stops when settled (attachment %s)',
+    async (stored) => {
+      jest.useFakeTimers();
+      focusManager.setFocused(true);
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const chatId = 'convo-id';
+      const messageId = 'original-reply';
+      const toolCallId = 'qwen-call';
+      const expiresAt = Date.now() + 60_000;
+      const name = `generate_image${Constants.mcp_delimiter}bfe-medien`;
+      const output = JSON.stringify({
+        status: 'running',
+        acceptance: 'confirmed',
+        pickup_expires_at: expiresAt,
+      });
+      const reply = message({
+        messageId,
+        conversationId: chatId,
+        isCreatedByUser: false,
+        content: [
+          {
+            type: ContentTypes.TOOL_CALL,
+            tool_call: stored
+              ? { id: toolCallId, name, args: '{}', output }
+              : { id: toolCallId, type: 'function', function: { name, arguments: '{}', output } },
+          },
+        ],
+      });
+      const attachment = {
+        file_id: 'image-id',
+        messageId,
+        toolCallId,
+        conversationId: chatId,
+        filename: 'image.png',
+        filepath: '/images/image.png',
+      };
+      const pending = { ...reply, mcpImagePickups: [{ toolCallId, expiresAt }] };
+      const settled = {
+        ...reply,
+        mcpImagePickups: [],
+        ...(stored && { attachments: [attachment] }),
+      };
+      const get = jest.mocked(dataService.getMessagesByConvoId);
+      get.mockReset().mockResolvedValueOnce([pending]).mockResolvedValue([settled]);
+      queryClient.setQueryData([QueryKeys.messages, chatId], [reply]);
+
+      const { result, rerender, unmount } = renderHook(
+        ({ isStreaming }) =>
+          useGetMessagesByConvoId(
+            chatId,
+            {
+              refetchInterval: isStreaming ? false : mcpImagePickupRefetchInterval,
+              refetchIntervalInBackground: false,
+            },
+            { isStreaming },
+          ),
+        {
+          initialProps: { isStreaming: true },
+          wrapper: createWrapper(queryClient, `/c/${chatId}`),
+        },
+      );
+      try {
+        await act(() => jest.advanceTimersByTimeAsync(5_001));
+        expect(get).not.toHaveBeenCalled();
+        rerender({ isStreaming: false });
+        await act(() => jest.advanceTimersByTimeAsync(5_001));
+        await waitFor(() => expect(result.current.data).toEqual([pending]));
+        await act(() => jest.advanceTimersByTimeAsync(5_001));
+        await waitFor(() => expect(result.current.data).toEqual([settled]));
+        expect(result.current.data?.[0]?.attachments).toEqual(stored ? [attachment] : undefined);
+        await act(() => jest.advanceTimersByTimeAsync(10_000));
+        expect(get).toHaveBeenCalledTimes(2);
+      } finally {
+        unmount();
+        queryClient.clear();
+        focusManager.setFocused(undefined);
+        jest.useRealTimers();
+      }
+    },
+  );
+
+  it('does not poll expired pickups or ordinary messages', () => {
+    expect(
+      mcpImagePickupRefetchInterval([
+        message({
+          isCreatedByUser: false,
+          mcpImagePickups: [{ toolCallId: 'call', expiresAt: Date.now() - 1 }],
+        }),
+        message({ isCreatedByUser: false }),
+      ]),
+    ).toBe(false);
   });
 });
 

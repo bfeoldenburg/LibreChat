@@ -1,6 +1,7 @@
 import type {
   TFeedbackRating,
   TFeedbackTag,
+  TMessage,
   TReasoningOverride,
   UserSubmittedMessageFieldPath,
 } from 'librechat-data-provider';
@@ -91,6 +92,7 @@ export interface IMessage extends Document {
   files?: unknown[];
   /** Private job bindings written by the MCP image host. */
   mcpImageJobs?: { key: string; fileId: string; toolCallId: string }[];
+  mcpImagePickups?: NonNullable<TMessage['mcpImagePickups']>;
   plugin?: {
     latest?: string;
     inputs?: unknown[];

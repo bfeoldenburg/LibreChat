@@ -162,6 +162,8 @@ export default function ContentRow({
               enterEdit,
               siblingIdx,
               attachments,
+              mcpImagePickups: message.mcpImagePickups,
+              isUserSubmitted: message.isUserSubmitted,
               searchResults,
               isSubmitting,
               isLatestMessage,

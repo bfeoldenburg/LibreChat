@@ -6,6 +6,7 @@ import type { TMessage, TAgentQueuedTurnReceipt } from 'librechat-data-provider'
 import type { QueryClient, QueryCacheNotifyEvent } from '@tanstack/react-query';
 import {
   refetchMessagesOnMount,
+  mcpImagePickupRefetchInterval,
   useAbortStreamMutation,
   useGetMessagesByConvoId,
 } from '~/data-provider';
@@ -102,6 +103,8 @@ function useMessages(
     {
       enabled: enabled && !!conversationId && conversationId !== Constants.SEARCH,
       refetchOnMount: refetchMessagesOnMount,
+      refetchInterval: isStreaming ? false : mcpImagePickupRefetchInterval,
+      refetchIntervalInBackground: false,
     },
     { isStreaming },
   );
