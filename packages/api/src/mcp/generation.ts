@@ -82,7 +82,7 @@ const startedSchema = z.object({
   delivery_status: z.enum(['not_started', 'pending', 'failed']),
 });
 const pickupSchema = z.object({
-  status: z.enum(['queued', 'running']),
+  status: z.enum(['queued', 'running', 'image_ready']),
   acceptance: z.literal('confirmed'),
   pickup_expires_at: z.number().int().positive(),
   resolution: z
@@ -106,6 +106,12 @@ const resultSchema = z.object({
   delivery_status: z.literal('pending'),
   job_status: z.literal('succeeded').optional(),
   acceptance: z.literal('confirmed').optional(),
+  pickup_expires_at: pickupSchema.shape.pickup_expires_at.optional(),
+  resolution: pickupSchema.shape.resolution,
+});
+const downloadTicketSchema = z.object({
+  ticket: z.string().regex(/^[A-Za-z0-9_-]{1,1024}={0,2}$/),
+  expires_at: z.number().int().positive(),
 });
 
 function parseResult(text: string): unknown {
@@ -118,13 +124,19 @@ function parseResult(text: string): unknown {
 
 function lookupError(
   tool: string,
-  status: 'job_unavailable' | 'invalid_parameters' | 'backend_unavailable',
+  status:
+    | 'job_unavailable'
+    | 'invalid_parameters'
+    | 'backend_unavailable'
+    | 'image_download_failed',
 ): FormattedToolResponse {
   const messages = {
     job_unavailable: 'Dieser Bildauftrag ist nicht verfügbar. Keinen Ersatzauftrag starten.',
     invalid_parameters: 'Nur die öffentliche Auftragsreferenz job_reference angeben.',
     backend_unavailable:
       'Der Bildauftrag kann derzeit nicht abgefragt werden. Keinen Ersatzauftrag starten.',
+    image_download_failed:
+      'Das vorhandene Bild konnte nicht abgerufen werden. Keinen Ersatzauftrag starten.',
   };
   return markMCPToolResultError(
     [
@@ -171,9 +183,17 @@ function storageFailed(jobReference: string): FormattedToolResponse {
 /** Keep generated image data out of the provider and MCP Apps output. */
 export function formatMCPImageJobResult(
   result: MCPToolCallResponse,
+  directDownload = false,
 ): FormattedToolResponse | undefined {
   const ready = resultSchema.safeParse(result?.structuredContent);
   if (!ready.success || result?.isError) return undefined;
+  const transfer = result?._meta?.['librechat/media-download'];
+  if (transfer != null) {
+    const parsed = downloadTicketSchema.safeParse(transfer);
+    return directDownload && parsed.success
+      ? [JSON.stringify(ready.data), { mediaDownload: parsed.data }]
+      : storageFailed(ready.data.job_reference);
+  }
   const images = result?.content?.filter((part) => part.type === 'image') ?? [];
   if (images.length !== 1) return storageFailed(ready.data.job_reference);
   try {
@@ -187,14 +207,21 @@ export function formatMCPImageJobResult(
 async function storeResult(
   result: FormattedToolResponse,
   publicResult: z.infer<typeof resultSchema>,
-  target: Omit<ImageStorageInput, 'dataUrl'>,
+  target: Omit<ImageStorageInput, 'dataUrl' | 'download'>,
   saveImage: Dependencies['saveImage'],
+  signal?: AbortSignal,
 ): Promise<FormattedToolResponse> {
+  const transfer = result[1]?.mediaDownload;
   const image = result[1]?.content?.[0];
-  if (result[1]?.content?.length !== 1 || image?.type !== 'image_url') {
+  const base64 =
+    result[1]?.content?.length === 1 && image?.type === 'image_url'
+      ? { dataUrl: image.image_url.url }
+      : undefined;
+  const source = transfer ? { download: { ...transfer, signal } } : base64;
+  if (!source) {
     return storageFailed(publicResult.job_reference);
   }
-  const saved = await saveImage({ ...target, dataUrl: image.image_url.url });
+  const saved = await saveImage({ ...target, ...source });
   return [
     JSON.stringify({
       ...publicResult,
@@ -231,7 +258,7 @@ async function lookupImageJob({
   serverName: string;
   reference: string;
   toolName: LookupTool;
-  invoke: () => Promise<FormattedToolResponse>;
+  invoke: (directDownload: boolean) => Promise<FormattedToolResponse>;
   signal?: AbortSignal;
 }): Promise<FormattedToolResponse> {
   const [conversation, binding] = await Promise.all([
@@ -242,7 +269,14 @@ async function lookupImageJob({
   if (signal?.aborted || !binding || !conversationAvailable(conversation, user)) {
     return lookupError(toolName, 'job_unavailable');
   }
-  const result = await invoke();
+  const config =
+    toolName === 'get_media_result'
+      ? await deps
+          .getAppConfig({ userId: scope.userId, role: user.role, tenantId: scope.tenantId })
+          .catch(() => undefined)
+      : undefined;
+  if (toolName === 'get_media_result' && !config) return storageFailed(reference);
+  const result = await invoke(!!config?.mcpSettings?.mediaDownloadOrigin);
   if (toolName === 'get_media_job_status' || isMCPToolResultError(result)) return result;
   const ready = resultSchema.safeParse(parseResult(result[0])).data;
   if (!ready) return [result[0], undefined];
@@ -250,11 +284,6 @@ async function lookupImageJob({
     return lookupError(toolName, 'job_unavailable');
   }
   try {
-    const config = await deps.getAppConfig({
-      userId: scope.userId,
-      role: user.role,
-      tenantId: scope.tenantId,
-    });
     if (!config) return storageFailed(reference);
     if (signal?.aborted || !conversationAvailable(conversation, user)) {
       return lookupError(toolName, 'job_unavailable');
@@ -269,12 +298,17 @@ async function lookupImageJob({
         messageId: binding.messageId,
         fileId: binding.fileId,
         toolCallId: binding.toolCallId,
+        bindingKey: binding.key,
       },
       deps.saveImage,
+      signal,
     );
   } catch (error) {
     if (error instanceof Error && error.message === 'image_target_unavailable') {
       return lookupError(toolName, 'job_unavailable');
+    }
+    if (error instanceof Error && error.message === 'image_download_failed') {
+      return lookupError(toolName, 'image_download_failed');
     }
     return storageFailed(reference);
   }
@@ -336,7 +370,7 @@ export function createMCPImagePickup({
               reference,
               toolName,
               signal,
-              invoke: async () => {
+              invoke: async (directMediaDownload) => {
                 const configs = await deps.getServerConfigs(userId, user);
                 const serverConfig = Object.prototype.hasOwnProperty.call(configs, serverName)
                   ? configs[serverName]
@@ -352,6 +386,7 @@ export function createMCPImagePickup({
                   toolArguments: { job_reference: reference },
                   requestBody,
                   nativeImageResult: true,
+                  directMediaDownload,
                   unattended: true,
                   options: { signal },
                   flowManager: deps.getFlowManager(),
@@ -420,10 +455,12 @@ export function createMCPImageInvoker({
         serverName,
         reference: args.data.job_reference,
         toolName,
-        invoke: () =>
+        signal: invocation.options?.signal,
+        invoke: (directMediaDownload) =>
           invokeTool(manager, {
             ...invocation,
             nativeImageResult: toolName === 'get_media_result',
+            directMediaDownload,
           }),
       });
     }
@@ -434,8 +471,10 @@ export function createMCPImageInvoker({
             .update(JSON.stringify([user.id, invocation.serverName, target.data]))
             .digest('hex')
         : undefined;
+    const config = scope ? await getConfig()?.catch(() => undefined) : undefined;
     const result = await invokeTool(manager, {
       ...invocation,
+      directMediaDownload: !!config?.mcpSettings?.mediaDownloadOrigin,
       ...(callId && {
         requestMeta: () => {
           const newIntent = !dispatched.has(callId);
@@ -451,10 +490,7 @@ export function createMCPImageInvoker({
     try {
       if (!user || !scope || !target.success || !callId) return storageFailed(reference);
       const { conversationId, messageId, toolCallId } = target.data;
-      const [conversation, config] = await Promise.all([
-        deps.getConvo(user.id, conversationId),
-        getConfig(),
-      ]);
+      const conversation = await deps.getConvo(user.id, conversationId);
       if (!config || !conversationAvailable(conversation, user)) return storageFailed(reference);
       const row = await deps.saveMessage(
         {
@@ -509,18 +545,43 @@ export function createMCPImageInvoker({
         return storageFailed(reference);
       }
       if (failed) return result;
-      if (expiresAt != null) {
+      if (expiresAt != null && pickup?.status !== 'image_ready') {
         enqueuePickup?.({ ...scope, messageId, toolCallId, serverName, reference, expiresAt });
-        return result;
+        return [result[0], undefined];
       }
       const ready = resultSchema.safeParse(data).data;
       if (!ready) return result;
-      return await storeResult(
-        result,
-        ready,
-        { user, config, conversationId, messageId, fileId, toolCallId },
-        deps.saveImage,
-      );
+      try {
+        return await storeResult(
+          result,
+          ready,
+          {
+            user,
+            config,
+            conversationId,
+            messageId,
+            fileId,
+            toolCallId,
+            bindingKey: bindingKey(serverName, reference),
+          },
+          deps.saveImage,
+          invocation.options?.signal,
+        );
+      } catch (error) {
+        if (expiresAt == null || !enqueuePickup) throw error;
+        enqueuePickup({ ...scope, messageId, toolCallId, serverName, reference, expiresAt });
+        return [
+          JSON.stringify({
+            status: 'running',
+            acceptance: 'confirmed',
+            job_reference: reference,
+            pickup_expires_at: expiresAt,
+            resolution: ready.resolution,
+            message: 'LibreChat holt das fertige Bild im Hintergrund ab.',
+          }),
+          undefined,
+        ];
+      }
     } catch {
       return storageFailed(reference);
     }

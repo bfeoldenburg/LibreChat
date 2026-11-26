@@ -31,6 +31,7 @@ const { logger, runAsSystem } = require('@librechat/data-schemas');
 const {
   sanitizeFilename,
   prepareGeneratedImage,
+  saveGeneratedImagePath,
   isMissingStorageError,
   createDeleteFileWithSecondaryStorage,
   finalizeFileDeletion,
@@ -1723,13 +1724,15 @@ async function savePreparedImage(
     }
   }
   const source = getFileStrategy(appConfig, { isImage: true });
-  const { saveBuffer } = getStrategyFunctions(source);
-  const filepath = await saveBuffer({
-    userId: req.user.id,
-    fileName: filename,
-    buffer: image.buffer,
-    tenantId: req.user.tenantId,
-  });
+  const storage = getStrategyFunctions(source);
+  const filepath = image.path
+    ? await saveGeneratedImagePath(source, storage, req, file_id, filename, image)
+    : await storage.saveBuffer({
+        userId: req.user.id,
+        fileName: filename,
+        buffer: image.buffer,
+        tenantId: req.user.tenantId,
+      });
   const storageMetadata = getStorageMetadata({ filepath, source });
   const storedCleanup = {
     req,

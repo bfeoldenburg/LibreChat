@@ -80,6 +80,8 @@ const {
 } = require('~/config');
 const db = require('~/models');
 const { resizeImageBuffer } = require('~/server/services/Files/images/resize');
+const savePreparedMCPImage = (...args) =>
+  require('~/server/services/Files/process').savePreparedImage(...args);
 const saveMCPImage = createMCPImageStorage({
   lease: {
     acquireResourceLock: db.acquireResourceLock,
@@ -89,8 +91,8 @@ const saveMCPImage = createMCPImageStorage({
   getMessage: db.getMessage,
   findFileById: db.findFileById,
   attachMCPImage: db.attachMCPImage,
-  savePreparedImage: (...args) =>
-    require('~/server/services/Files/process').savePreparedImage(...args),
+  savePreparedImage: savePreparedMCPImage,
+  saveDownloadedImage: savePreparedMCPImage,
   readStoredImage: (req, file) =>
     require('~/server/services/Files/strategies')
       .getStrategyFunctions(file.source)

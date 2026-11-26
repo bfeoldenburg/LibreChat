@@ -1,18 +1,29 @@
 import sharp from 'sharp';
 import { randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { logger } from '@librechat/data-schemas';
 import { EModelEndpoint, FileContext } from 'librechat-data-provider';
 import type { AppConfig, IMessage } from '@librechat/data-schemas';
 import type { ImageFile } from 'librechat-data-provider';
 import type { Readable } from 'node:stream';
 import type { GeneratedImage, GeneratedImageDependencies } from '~/files/generation';
+import type { ImageDownload } from './download';
 import type { LeaseDeps } from '~/admin/lease';
-import { prepareGeneratedImage } from '~/files/generation';
+import {
+  MAX_IMAGE_BYTES,
+  stageStoredMCPImage,
+  withMCPImageDownload,
+  withTemporaryMCPImage,
+} from './download';
+import {
+  generatedImageResolution,
+  inspectGeneratedImage,
+  prepareGeneratedImage,
+} from '~/files/generation';
 import { ResourcePermissionsBusyError } from '~/acl/codes';
 import { getSafeErrorMetadata } from '~/utils/errors';
 import { withLease } from '~/admin/lease';
 
-const MAX_IMAGE_BYTES = 16_777_216;
 const rasterTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/tiff']);
 const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 
@@ -79,6 +90,21 @@ type StorageRequest = {
   body: { conversationId: string };
   fileRetentionSource: { isTemporary?: boolean; expiredAt?: Date | null };
 };
+export interface DownloadedImage extends Omit<GeneratedImage, 'buffer'> {
+  path: string;
+}
+type SaveImageOptions = {
+  req: StorageRequest;
+  file_id: string;
+  filename: string;
+  context: FileContext;
+  association: {
+    conversationId: string;
+    messageId: string;
+    metadata: ImageLinks;
+  };
+};
+type ImageInput = { mime: string; data: Buffer } | { download: ImageDownload };
 
 export interface ImageStorageDependencies {
   lease?: LeaseDeps;
@@ -100,17 +126,11 @@ export interface ImageStorageDependencies {
   attachMCPImage: (target: Target, image: ImageFile, originalFileId: string) => Promise<boolean>;
   savePreparedImage: (
     image: GeneratedImage,
-    options: {
-      req: StorageRequest;
-      file_id: string;
-      filename: string;
-      context: FileContext;
-      association: {
-        conversationId: string;
-        messageId: string;
-        metadata: ImageLinks;
-      };
-    },
+    options: SaveImageOptions,
+  ) => Promise<ImportFile | null>;
+  saveDownloadedImage?: (
+    image: DownloadedImage,
+    options: SaveImageOptions,
   ) => Promise<ImportFile | null>;
   readStoredImage: (req: StorageRequest, file: ImportFile) => Promise<Readable>;
   resizeImageBuffer: GeneratedImageDependencies['resizeImageBuffer'];
@@ -123,7 +143,6 @@ async function prepare(
   resizeImageBuffer: ImageStorageDependencies['resizeImageBuffer'],
 ) {
   const endpoint = EModelEndpoint.agents;
-  const options = { endpoint, config: config.fileConfig?.imageGeneration };
   try {
     const original = await prepareGeneratedImage(
       input,
@@ -131,28 +150,41 @@ async function prepare(
       { resizeImageBuffer },
     );
     if (original.type !== mime) throw new Error('Image does not match declared type');
-    if (mime === 'image/tiff') {
-      const { data, info } = await sharp(input)
-        .rotate()
-        .png()
-        .toBuffer({ resolveWithObject: true });
-      return {
-        original,
-        display: {
-          buffer: data,
-          type: 'image/png',
-          bytes: data.length,
-          width: info.width,
-          height: info.height,
-        },
-      };
-    }
-    if (options.config?.preserveOriginal === true) return { original };
-    const display = await prepareGeneratedImage(input, options, { resizeImageBuffer });
-    return input.equals(display.buffer) ? { original } : { original, display };
+    const display = await prepareDisplay(input, mime, config, resizeImageBuffer);
+    return !display || input.equals(display.buffer) ? { original } : { original, display };
   } catch {
     throw new Error('image_content_invalid');
   }
+}
+
+async function prepareDisplay(
+  input: Buffer | string,
+  mime: string,
+  config: AppConfig,
+  resizeImageBuffer: ImageStorageDependencies['resizeImageBuffer'],
+): Promise<GeneratedImage | undefined> {
+  if (mime === 'image/tiff') {
+    const { data, info } = await sharp(input).rotate().png().toBuffer({ resolveWithObject: true });
+    return {
+      buffer: data,
+      type: 'image/png',
+      bytes: data.length,
+      width: info.width,
+      height: info.height,
+    };
+  }
+  const settings = config.fileConfig?.imageGeneration;
+  if (settings?.preserveOriginal === true) return undefined;
+  return resizeImageBuffer(input, generatedImageResolution(settings), EModelEndpoint.agents);
+}
+
+async function matchesOriginal(path: string, preview: Buffer): Promise<boolean> {
+  let offset = 0;
+  for await (const chunk of createReadStream(path)) {
+    if (!preview.subarray(offset, offset + chunk.length).equals(chunk)) return false;
+    offset += chunk.length;
+  }
+  return offset === preview.length;
 }
 
 function fileMatchesTarget(file: ImportFile, target: Target) {
@@ -315,25 +347,10 @@ export async function restoreMCPImageAttachments<T extends HistoryMessage>(
   }
 }
 
-async function readOriginal(req: StorageRequest, file: ImportFile, deps: ImageStorageDependencies) {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  const stream = await deps.readStoredImage(req, file);
-  for await (const chunk of stream) {
-    if (!Buffer.isBuffer(chunk) || (bytes += chunk.length) > MAX_IMAGE_BYTES) {
-      throw new Error('Stored image exceeds transfer limit');
-    }
-    chunks.push(chunk);
-  }
-  if (bytes !== file.bytes) throw new Error('Stored image is incomplete');
-  return Buffer.concat(chunks, bytes);
-}
-
 async function store(
   target: Target,
   fileId: string,
-  mime: string,
-  input: Buffer,
+  input: ImageInput,
   user: Owner,
   config: AppConfig,
   deps: ImageStorageDependencies,
@@ -355,8 +372,10 @@ async function store(
     throw new Error('image_target_unavailable');
   }
 
+  const signal = 'download' in input ? input.download.signal : undefined;
   const attachDisplay = async (display: ImportFile) => {
     const image = asMCPImageFile(display);
+    signal?.throwIfAborted();
     await fence();
     if (!(await deps.attachMCPImage(target, image, fileId))) {
       throw new Error('image_target_unavailable');
@@ -386,19 +405,49 @@ async function store(
   if (originalFile) {
     checkFile(originalFile, target);
   } else {
-    const prepared = await prepare(input, mime, config, deps.resizeImageBuffer);
-    preparedDisplay = prepared.display;
-    await fence();
-    originalFile = await deps.savePreparedImage(prepared.original, {
+    const options: SaveImageOptions = {
       req,
       file_id: fileId,
       filename: 'image-original',
       context: FileContext.image_generation,
       association: {
         ...association,
-        metadata: preparedDisplay ? { imageDisplayFileId: randomUUID() } : {},
+        metadata: {},
       },
-    });
+    };
+    const setDisplay = (display: GeneratedImage | undefined) => {
+      preparedDisplay = display;
+      if (display) options.association.metadata.imageDisplayFileId = randomUUID();
+    };
+    if ('download' in input) {
+      const origin = config.mcpSettings?.mediaDownloadOrigin;
+      const saveDownloaded = deps.saveDownloadedImage;
+      if (!origin || !saveDownloaded) throw new Error('image_target_unavailable');
+      originalFile = await withMCPImageDownload(
+        origin,
+        input.download,
+        async (path, mime, bytes, signal) => {
+          const image = await inspectGeneratedImage(path);
+          if (image.type !== mime || !rasterTypes.has(mime))
+            throw new Error('image_content_invalid');
+          const display = await prepareDisplay(path, mime, config, deps.resizeImageBuffer);
+          if (
+            display &&
+            (display.bytes !== bytes || !(await matchesOriginal(path, display.buffer)))
+          ) {
+            setDisplay(display);
+          }
+          await fence();
+          signal.throwIfAborted();
+          return saveDownloaded({ ...image, path, bytes }, options);
+        },
+      );
+    } else {
+      const prepared = await prepare(input.data, input.mime, config, deps.resizeImageBuffer);
+      setDisplay(prepared.display);
+      await fence();
+      originalFile = await deps.savePreparedImage(prepared.original, options);
+    }
     if (!originalFile) throw new Error('Image file record was not created');
   }
   let displayFile = originalFile;
@@ -414,18 +463,21 @@ async function store(
     } else {
       // A failed import may already have saved the original. Derive the preview from
       // that file on retry, since the upstream filename may now hold different bytes.
+      const original = originalFile;
       const display =
         preparedDisplay ??
-        (
-          await prepare(
-            await readOriginal(req, originalFile, deps),
-            originalFile.type,
-            config,
-            deps.resizeImageBuffer,
-          )
-        ).display;
+        (await withTemporaryMCPImage(async (path) => {
+          await stageStoredMCPImage(
+            path,
+            await deps.readStoredImage(req, original),
+            original.bytes,
+            signal,
+          );
+          return prepareDisplay(path, original.type, config, deps.resizeImageBuffer);
+        }));
       if (!display) throw new Error('image_file_unavailable');
       await fence();
+      signal?.throwIfAborted();
       const saved = await deps.savePreparedImage(display, {
         req,
         file_id: previewId,
@@ -440,14 +492,31 @@ async function store(
   return attachDisplay(displayFile);
 }
 
-export interface ImageStorageInput {
+export type ImageStorageInput = {
   user: Owner;
   config: AppConfig;
   conversationId: string;
   messageId: string;
   toolCallId?: string;
   fileId: string;
-  dataUrl: string;
+  bindingKey?: string;
+} & ({ dataUrl: string } | { download: ImageDownload });
+
+function parseImageInput(input: ImageStorageInput): ImageInput {
+  if ('download' in input) return { download: input.download };
+  const match = /^data:(image\/[a-z]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(input.dataUrl);
+  if (
+    !match ||
+    !rasterTypes.has(match[1]) ||
+    match[2].length > 4 * Math.ceil(MAX_IMAGE_BYTES / 3)
+  ) {
+    throw new Error('image_content_invalid');
+  }
+  const data = Buffer.from(match[2], 'base64');
+  if (!data.length || data.length > MAX_IMAGE_BYTES || data.toString('base64') !== match[2]) {
+    throw new Error('image_content_invalid');
+  }
+  return { data, mime: match[1] };
 }
 
 /** Store a regular MCP image result using only trusted, host-owned context. */
@@ -467,18 +536,6 @@ export function createMCPImageStorage(
     const pending = active.get(key);
     if (pending) return pending;
     const save = async (): Promise<ImageFile> => {
-      const match = /^data:(image\/[a-z]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(input.dataUrl);
-      if (
-        !match ||
-        !rasterTypes.has(match[1]) ||
-        match[2].length > 4 * Math.ceil(MAX_IMAGE_BYTES / 3)
-      ) {
-        throw new Error('image_content_invalid');
-      }
-      const data = Buffer.from(match[2], 'base64');
-      if (!data.length || data.length > MAX_IMAGE_BYTES || data.toString('base64') !== match[2]) {
-        throw new Error('image_content_invalid');
-      }
       return withLease(deps.lease, mcpImageLeaseKey(input.fileId), (fence) =>
         store(
           {
@@ -487,10 +544,10 @@ export function createMCPImageStorage(
             conversationId: input.conversationId,
             messageId: input.messageId,
             toolCallId: input.toolCallId,
+            bindingKey: input.bindingKey,
           },
           input.fileId,
-          match[1],
-          data,
+          parseImageInput(input),
           input.user,
           input.config,
           deps,

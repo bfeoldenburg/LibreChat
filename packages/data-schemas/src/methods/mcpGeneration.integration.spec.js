@@ -7,11 +7,11 @@ import { once } from 'node:events';
 import { jest } from '@jest/globals';
 import { Readable } from 'node:stream';
 import { createServer } from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {
   createMCPImageInvoker,
@@ -47,9 +47,22 @@ async function waitFor(condition, message) {
 }
 
 integration('image retrieval with real MCP and native MongoDB attachments', () => {
-  it.each(['manual', 'closed', 'race', 'expired', 'lost'])(
+  it.each([
+    'manual',
+    'closed',
+    'race',
+    'expired',
+    'lost',
+    'direct-closed',
+    'direct-race',
+    'direct-expired',
+    'direct-lost',
+  ])(
     'retrieves or stops an existing job (%s)',
-    async (scenario) => {
+    async (mode) => {
+      const direct = mode.startsWith('direct-');
+      const scenario = mode.replace(/^direct-/, '');
+      const usePreview = direct && scenario === 'race';
       const mongo = await MongoMemoryServer.create();
       const directory = await mkdtemp(join(tmpdir(), 'mcp-generation-'));
       await mongoose.connect(mongo.getUri());
@@ -70,24 +83,34 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
       const storageConfig = {
         fileConfig: {
           imageGeneration: {
-            preserveOriginal: true,
+            ...(usePreview ? { px: 768 } : { preserveOriginal: true }),
           },
         },
       };
-      const source = await sharp({
-        create: {
-          width: 12,
-          height: 8,
-          channels: 3,
-          background: 'green',
-        },
-      })
-        .tiff()
-        .toBuffer();
-      await writeFile(join(directory, 'source.tiff'), source);
+      const source = direct
+        ? await sharp(randomBytes(2048 * 2048 * 4), {
+            raw: { width: 2048, height: 2048, channels: 4 },
+          })
+            .png()
+            .toBuffer()
+        : await sharp({
+            create: {
+              width: 12,
+              height: 8,
+              channels: 3,
+              background: 'green',
+            },
+          })
+            .tiff()
+            .toBuffer();
+      if (direct) expect(source.length).toBeGreaterThan(16 * 1024 * 1024);
+      const records = direct && !usePreview ? 1 : 2;
+      await writeFile(join(directory, direct ? 'source.png' : 'source.tiff'), source);
       const savePreparedImage = jest.fn(async (image, options) => {
         const { req, file_id, filename, context, association } = options;
-        await writeFile(join(directory, file_id), image.buffer);
+        const destination = join(directory, file_id);
+        if (image.path) await copyFile(image.path, destination);
+        else await writeFile(destination, image.buffer);
         return files.createFile(
           {
             ...association,
@@ -113,9 +136,23 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
         // Test storage adapter: actual temporary files and native File rows.
         // The production provider's storage strategy is tested separately.
         savePreparedImage,
+        saveDownloadedImage: savePreparedImage,
         readStoredImage: async (_req, file) =>
           Readable.from([await readFile(join(directory, file.file_id))]),
-        resizeImageBuffer: async () => {
+        resizeImageBuffer: async (input, options) => {
+          if (usePreview) {
+            const { data, info } = await sharp(input)
+              .resize({ width: options.px, height: options.px, fit: 'inside' })
+              .png()
+              .toBuffer({ resolveWithObject: true });
+            return {
+              buffer: data,
+              width: info.width,
+              height: info.height,
+              bytes: data.length,
+              type: 'image/png',
+            };
+          }
           throw new Error('preserveOriginal must bypass resizing');
         },
       };
@@ -165,6 +202,7 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
       const reservation = createServer().listen(0, '127.0.0.1');
       await once(reservation, 'listening');
       const port = reservation.address().port;
+      if (direct) storageConfig.mcpSettings = { mediaDownloadOrigin: `http://127.0.0.1:${port}` };
       await new Promise((resolve) => reservation.close(() => resolve()));
       const child = spawn(
         python,
@@ -227,13 +265,20 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
             {
               name: invocation.toolName,
               arguments: invocation.toolArguments,
-              _meta: invocation.requestMeta?.(),
+              _meta: {
+                ...invocation.requestMeta?.(),
+                ...(invocation.directMediaDownload && { 'librechat/media-download': 'v1' }),
+              },
             },
             undefined,
             invocation.options,
           );
+          if (direct && result.structuredContent?.status === 'image_ready') {
+            expect(result.content.some((part) => part.type === 'image')).toBe(false);
+            expect(result._meta?.['librechat/media-download']?.ticket).toBeTruthy();
+          }
           return (
-            formatMCPImageJobResult(result) ??
+            formatMCPImageJobResult(result, invocation.directMediaDownload) ??
             markMCPToolResultError(formatToolContent(result, 'openai'), result.isError === true)
           );
         };
@@ -416,7 +461,12 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
             const row = await messages.getMessage({ user: OWNER, messageId });
             return row?.mcpImagePickups?.length === 0;
           }, 'the settled pickup was still advertised');
-          expect(await backendState()).toEqual({ jobs: 1, submissions: 1, translations: 1 });
+          expect(await backendState()).toEqual({
+            jobs: 1,
+            submissions: 1,
+            translations: 1,
+            ...(direct && { download_reads: 0 }),
+          });
           return;
         }
         const reopen = () =>
@@ -434,7 +484,7 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
             messageId,
             toolCallId: context.toolCallId,
           });
-          expect(savePreparedImage).toHaveBeenCalledTimes(2);
+          expect(savePreparedImage).toHaveBeenCalledTimes(records);
           await connect(client);
         } else {
           await waitFor(
@@ -456,18 +506,30 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
           await waitFor(() => pickedUp, 'background pickup did not finish saving');
           expect(pickedUp.file_id).toBe(receipt.display_file_id);
         }
-        expect(savePreparedImage).toHaveBeenCalledTimes(2);
-        expect(receipt.file_id).not.toBe(receipt.display_file_id);
-        expect(await readFile(join(directory, receipt.file_id))).toEqual(source);
+        expect(savePreparedImage).toHaveBeenCalledTimes(records);
+        expect(receipt.file_id === receipt.display_file_id).toBe(records === 1);
+        expect((await readFile(join(directory, receipt.file_id))).equals(source)).toBe(true);
         expect(
           (await sharp(await readFile(join(directory, receipt.display_file_id))).metadata()).format,
         ).toBe('png');
-        expect((await files.findFileById(receipt.file_id))?.metadata?.imageDisplayFileId).toBe(
-          receipt.display_file_id,
-        );
-        expect(
-          (await files.findFileById(receipt.display_file_id))?.metadata?.imageOriginalFileId,
-        ).toBe(receipt.file_id);
+        if (records === 2) {
+          expect((await files.findFileById(receipt.file_id))?.metadata?.imageDisplayFileId).toBe(
+            receipt.display_file_id,
+          );
+          expect(
+            (await files.findFileById(receipt.display_file_id))?.metadata?.imageOriginalFileId,
+          ).toBe(receipt.file_id);
+        }
+        if (usePreview) {
+          expect(await files.findFileById(receipt.file_id)).toMatchObject({
+            width: 2048,
+            height: 2048,
+          });
+          expect(await files.findFileById(receipt.display_file_id)).toMatchObject({
+            width: 768,
+            height: 768,
+          });
+        }
         const collected = [];
         const emit = jest.fn();
         collectMCPImageAttachments({
@@ -511,8 +573,8 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
         expect(JSON.parse((await anotherHost(manager, resultInvocation, laterContext))[0])).toEqual(
           receipt,
         );
-        expect(savePreparedImage).toHaveBeenCalledTimes(2);
-        expect(await mongoose.models.File.countDocuments()).toBe(2);
+        expect(savePreparedImage).toHaveBeenCalledTimes(records);
+        expect(await mongoose.models.File.countDocuments()).toBe(records);
         const invalid = await call(
           manager,
           {
@@ -528,7 +590,12 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
           },
         );
         expect(JSON.parse(invalid[0]).job_created).toBe(false);
-        expect(await backendState()).toEqual({ jobs: 1, submissions: 1, translations: 1 });
+        expect(await backendState()).toEqual({
+          jobs: 1,
+          submissions: 1,
+          translations: 1,
+          ...(direct && { download_reads: 1 }),
+        });
         const otherTarget = { ...context, messageId: randomUUID(), toolCallId: 'deleted-target' };
         const other = await anotherHost(
           manager,
@@ -574,8 +641,13 @@ integration('image retrieval with real MCP and native MongoDB attachments', () =
           conversationId: randomUUID(),
         });
         expect(wrongConversation).toBe(deleted);
-        expect(savePreparedImage).toHaveBeenCalledTimes(2);
-        expect(await backendState()).toEqual({ jobs: 2, submissions: 2, translations: 2 });
+        expect(savePreparedImage).toHaveBeenCalledTimes(records);
+        expect(await backendState()).toEqual({
+          jobs: 2,
+          submissions: 2,
+          translations: 2,
+          ...(direct && { download_reads: 1 }),
+        });
       } finally {
         await pickupClient.close();
         await client.close();

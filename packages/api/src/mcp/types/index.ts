@@ -160,6 +160,8 @@ export type Artifacts =
       imageAttachments?: FormattedContent[];
       /** Existing native images, verified by the host; never decoded from MCP content. */
       nativeImageFiles?: (ImageFile & { messageId?: string; toolCallId?: string })[];
+      /** Server-only authorization consumed by the image invoker. */
+      mediaDownload?: { ticket: string; expires_at: number };
       [Tools.ui_resources]?: {
         data: UIResource[];
       };

@@ -1531,6 +1531,7 @@ Please follow these instructions when using tools from the respective MCP server
     toolArguments,
     requestMeta,
     nativeImageResult,
+    directMediaDownload,
     options,
     tokenMethods,
     requestBody,
@@ -1566,6 +1567,7 @@ Please follow these instructions when using tools from the respective MCP server
     requestMeta?: () => Record<string, unknown>;
     /** Keep a generated image on the host's native attachment path. */
     nativeImageResult?: boolean;
+    directMediaDownload?: boolean;
     options?: RequestOptions;
     requestBody?: RequestBody;
     requestScopedConnections?: t.RequestScopedMCPConnectionStore;
@@ -2044,7 +2046,12 @@ Please follow these instructions when using tools from the respective MCP server
                   params: {
                     name: toolName,
                     arguments: toolArguments,
-                    ...(requestMeta && { _meta: requestMeta() }),
+                    ...((requestMeta || directMediaDownload) && {
+                      _meta: {
+                        ...requestMeta?.(),
+                        ...(directMediaDownload && { 'librechat/media-download': 'v1' }),
+                      },
+                    }),
                   },
                 },
                 CallToolResultSchema,
@@ -2180,7 +2187,7 @@ Please follow these instructions when using tools from the respective MCP server
         this.checkIdleConnections();
         const toolResult = result as t.MCPToolCallResponse;
         if (nativeImageResult || (requestMeta && toolName === 'generate_image')) {
-          const image = formatMCPImageJobResult(toolResult);
+          const image = formatMCPImageJobResult(toolResult, directMediaDownload);
           if (image) return image;
         }
         const admittedMCPApps = mcpApps ?? DEFAULT_MCP_APPS_POLICY;

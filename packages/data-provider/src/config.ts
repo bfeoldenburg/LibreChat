@@ -4926,6 +4926,23 @@ export const configSchema = z.object({
     .prefault({}),
   mcpSettings: z
     .object({
+      /** Trusted FastAPI origin for server-side transfers of MCP-generated media. */
+      mediaDownloadOrigin: z
+        .string()
+        .url()
+        .refine((value) => {
+          if (!URL.canParse(value)) return false;
+          const url = new URL(value);
+          return (
+            ['http:', 'https:'].includes(url.protocol) &&
+            !url.username &&
+            !url.password &&
+            url.pathname === '/' &&
+            !url.search &&
+            !url.hash
+          );
+        })
+        .optional(),
       allowedDomains: z.array(z.string()).optional(),
       allowedAddresses: allowedAddressesSchema,
       /** How long a failed OAuth reconnection is remembered before its attempt count resets.

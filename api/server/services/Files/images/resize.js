@@ -5,7 +5,7 @@ const { EModelEndpoint } = require('librechat-data-provider');
 /**
  * Resizes an image from a given buffer based on the specified resolution.
  *
- * @param {Buffer} inputBuffer - The buffer of the image to be resized.
+ * @param {Buffer|string} inputBuffer - A buffer or path of the image to be resized.
  * @param {'low' | 'high' | {percentage?: number, px?: number}} resolution - The resolution to resize the image to.
  *                                      'low' for a maximum of 512x512 resolution,
  *                                      'high' for a maximum of 768x2000 resolution,

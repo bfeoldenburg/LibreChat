@@ -53,6 +53,7 @@ export * from './mcp/request';
 export * from './mcp/agent';
 export * from './mcp/generation';
 export * from './mcp/images';
+export * from './files/generatedStorage';
 export * from './mcp/reinitialize';
 export * from './mcp/icons';
 /* Utilities */

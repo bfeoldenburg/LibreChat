@@ -15,7 +15,7 @@ export interface GeneratedImage {
 
 export interface GeneratedImageDependencies {
   resizeImageBuffer: (
-    input: Buffer,
+    input: Buffer | string,
     resolution: ImageResolution,
     endpoint: string,
   ) => Promise<GeneratedImage>;
@@ -29,31 +29,36 @@ export async function prepareGeneratedImage(
 ): Promise<GeneratedImage> {
   const { config, resolution, endpoint } = options;
   if (config?.preserveOriginal !== true) {
-    const configuredResolution =
-      config?.preserveOriginal === false && config.percentage == null && config.px == null
-        ? 'high'
-        : config;
-    return resizeImageBuffer(input, resolution ?? configuredResolution ?? 'high', endpoint);
+    return resizeImageBuffer(input, resolution ?? generatedImageResolution(config), endpoint);
   }
 
   try {
-    // Decode all raster frames for validation without rotating, resizing or encoding.
-    const image = sharp(input, { animated: true, failOn: 'warning' });
-    const metadata = await image.metadata();
-    const type = resolveImageMimeType(metadata);
-    if (!type || !metadata.width || !metadata.height) {
-      throw new Error('Unsupported original image');
-    }
-    await image.stats();
     return {
       buffer: input,
       bytes: input.length,
-      width: metadata.width,
-      height: metadata.pageHeight ?? metadata.height,
-      type,
+      ...(await inspectGeneratedImage(input)),
     };
   } catch {
     // Do not expose decoder diagnostics or submitted contents in storage errors.
     throw new Error('Generated image cannot be preserved: invalid or unsupported raster image');
   }
+}
+
+export function generatedImageResolution(config?: ImageGenerationConfig): ImageResolution {
+  if (config?.preserveOriginal === false && config.percentage == null && config.px == null) {
+    return 'high';
+  }
+  return config ?? 'high';
+}
+
+/** Decode the raster to validate it without rotating, resizing or encoding it. */
+export async function inspectGeneratedImage(
+  input: Buffer | string,
+): Promise<{ type: string; width: number; height: number }> {
+  const image = sharp(input, { animated: true, failOn: 'warning' });
+  const metadata = await image.metadata();
+  const type = resolveImageMimeType(metadata);
+  if (!type || !metadata.width || !metadata.height) throw new Error('Unsupported original image');
+  await image.stats();
+  return { type, width: metadata.width, height: metadata.pageHeight ?? metadata.height };
 }
