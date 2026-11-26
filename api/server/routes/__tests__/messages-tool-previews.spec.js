@@ -3,6 +3,7 @@ const express = require('express');
 const request = require('supertest');
 const { v4: uuidv4 } = require('uuid');
 const { MongoMemoryServer } = require('mongodb-memory-server');
+const { FileContext } = require('librechat-data-provider');
 
 const mockDb = { methods: null };
 
@@ -49,8 +50,8 @@ jest.mock('~/server/middleware', () => {
   };
 });
 
-const OWNER = 'owner-user';
-const OTHER = 'other-user';
+const OWNER = 'a'.repeat(24);
+const OTHER = 'b'.repeat(24);
 
 const fullOutput = `stdout:\n${'compiled module\n'.repeat(3_000)}[exit code: 0]`;
 const fullArgs = JSON.stringify({
@@ -126,6 +127,7 @@ describe('tool-call previews on the message routes', () => {
     createModels(mongoose);
     mockDb.methods = createMethods(mongoose);
     await mongoose.connect(mongoServer.getUri());
+    await mongoose.models.ResourceLock.init();
 
     const messagesRouter = require('../messages');
     app = express();
@@ -146,6 +148,7 @@ describe('tool-call previews on the message routes', () => {
   beforeEach(async () => {
     await mongoose.models.Message.deleteMany({});
     await mongoose.models.Conversation.deleteMany({});
+    await mongoose.models.File.deleteMany({});
     conversationId = uuidv4();
     await mockDb.methods.saveConvo(
       { userId: OWNER },
@@ -180,6 +183,108 @@ describe('tool-call previews on the message routes', () => {
     expect(response.status).toBe(200);
     return response.body.find((message) => message.messageId === responseId);
   };
+
+  it.each(['native', 'linked', 'preview-missing'])(
+    'restores a stored MCP image when the original chat is reopened (%s)',
+    async (scenario) => {
+      const fileId = uuidv4();
+      const displayId = uuidv4();
+      const toolCallId = 'call_generate_image';
+      const key = JSON.stringify(['bfe-medien', 'synthetic-image-reference']);
+      await mockDb.methods.bindMCPImageJob(
+        { userId: OWNER, conversationId, messageId: responseId },
+        { key, fileId, toolCallId, pickupExpiresAt: Date.now() - 1000 },
+      );
+      const shared = {
+        user: OWNER,
+        conversationId,
+        messageId: responseId,
+        context: FileContext.image_generation,
+        source: 'local',
+        bytes: 128,
+        width: 2048,
+        height: 2048,
+      };
+      await mockDb.methods.createFile(
+        {
+          ...shared,
+          file_id: fileId,
+          type: scenario === 'linked' ? 'image/tiff' : 'image/png',
+          filename: 'image-original',
+          filepath: '/images/original',
+          ...(scenario !== 'native' && { metadata: { imageDisplayFileId: displayId } }),
+        },
+        true,
+      );
+      if (scenario === 'linked') {
+        await mockDb.methods.createFile(
+          {
+            ...shared,
+            file_id: displayId,
+            type: 'image/png',
+            filename: 'image-display.png',
+            filepath: '/images/display.png',
+            metadata: { imageOriginalFileId: fileId },
+          },
+          true,
+        );
+      }
+
+      const denied = await request(app).get(`/api/messages/${conversationId}`).set('x-user', OTHER);
+      expect(denied.status).toBe(404);
+      expect((await storedResponse()).attachments ?? []).toEqual([]);
+
+      const ready = await loadPreviews();
+      const renderId = scenario === 'linked' ? displayId : fileId;
+      expect(ready).not.toHaveProperty('mcpImageJobs');
+      expect(ready).not.toHaveProperty('user');
+      expect(ready.mcpImagePickups).toEqual([]);
+      expect(ready.attachments).toEqual([
+        expect.objectContaining({
+          file_id: renderId,
+          messageId: responseId,
+          toolCallId,
+          metadata: expect.objectContaining({ mcpImage: true }),
+        }),
+      ]);
+      expect((await loadPreviews()).attachments).toEqual(ready.attachments);
+      expect((await storedResponse()).attachments).toEqual(ready.attachments);
+      expect(await mongoose.models.File.countDocuments()).toBe(scenario === 'linked' ? 2 : 1);
+    },
+  );
+
+  it('leaves unattached files alone when the private binding or matching storage scope is missing', async () => {
+    const fileId = uuidv4();
+    const file = {
+      file_id: fileId,
+      user: OTHER,
+      conversationId,
+      messageId: responseId,
+      context: FileContext.image_generation,
+      source: 'local',
+      type: 'image/png',
+      filename: 'image-original.png',
+      filepath: '/images/original.png',
+      bytes: 128,
+    };
+    await mockDb.methods.createFile(file, true);
+    await mockDb.methods.bindMCPImageJob(
+      { userId: OWNER, conversationId, messageId: responseId },
+      { key: 'synthetic-binding', fileId, toolCallId: 'generate' },
+    );
+    const unauthorized = await loadPreviews();
+    expect(unauthorized).not.toHaveProperty('mcpImageJobs');
+    expect(unauthorized.attachments ?? []).toEqual([]);
+
+    await mongoose.models.Message.updateOne(
+      { messageId: responseId },
+      { $unset: { mcpImageJobs: 1 } },
+    );
+    await mockDb.methods.createFile({ ...file, user: OWNER }, true);
+    const unbound = await loadPreviews();
+    expect(unbound.attachments ?? []).toEqual([]);
+    expect(await mongoose.models.File.countDocuments()).toBe(1);
+  });
 
   it('sends previews with markers to a client that asks for them', async () => {
     const message = await loadPreviews();

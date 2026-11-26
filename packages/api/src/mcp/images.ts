@@ -1,5 +1,6 @@
 import sharp from 'sharp';
 import { randomUUID } from 'node:crypto';
+import { logger } from '@librechat/data-schemas';
 import { EModelEndpoint, FileContext } from 'librechat-data-provider';
 import type { AppConfig, IMessage } from '@librechat/data-schemas';
 import type { ImageFile } from 'librechat-data-provider';
@@ -7,6 +8,8 @@ import type { Readable } from 'node:stream';
 import type { GeneratedImage, GeneratedImageDependencies } from '~/files/generation';
 import type { LeaseDeps } from '~/admin/lease';
 import { prepareGeneratedImage } from '~/files/generation';
+import { ResourcePermissionsBusyError } from '~/acl/codes';
+import { getSafeErrorMetadata } from '~/utils/errors';
 import { withLease } from '~/admin/lease';
 
 const MAX_IMAGE_BYTES = 16_777_216;
@@ -41,6 +44,34 @@ type Target = {
   conversationId: string;
   messageId: string;
   toolCallId?: string;
+  bindingKey?: string;
+};
+type HistoryScope = Omit<Target, 'messageId' | 'toolCallId' | 'bindingKey'>;
+type HistoryMessage = Pick<
+  IMessage,
+  | 'messageId'
+  | 'conversationId'
+  | 'tenantId'
+  | 'isCreatedByUser'
+  | 'isUserSubmitted'
+  | 'files'
+  | 'attachments'
+  | 'mcpImageJobs'
+  | 'mcpImagePickups'
+  | 'updatedAt'
+>;
+type HistoryDependencies = Pick<ImageStorageDependencies, 'attachMCPImage' | 'lease'> & {
+  getMCPImageFiles: (
+    scope: HistoryScope,
+    messageIds: string[],
+    originalIds: string[],
+  ) => Promise<ImportFile[]>;
+  getMessages: (
+    filter: { user: string; conversationId: string; messageId: { $in: string[] } },
+    select: string,
+  ) => Promise<
+    Pick<IMessage, 'messageId' | 'files' | 'attachments' | 'mcpImagePickups' | 'updatedAt'>[]
+  >;
 };
 type StorageRequest = {
   user: Owner;
@@ -124,17 +155,21 @@ async function prepare(
   }
 }
 
-function checkFile(file: ImportFile, target: Target, tenantId: string | undefined) {
-  if (
-    String(file.user) !== target.userId ||
-    (file.tenantId ?? null) !== (tenantId ?? null) ||
-    file.conversationId !== target.conversationId ||
-    file.messageId !== target.messageId ||
-    file.context !== FileContext.image_generation ||
-    file.storageOperations?.deleting != null ||
-    file.storageOperations?.deletionPending === true ||
-    (file.expiredAt != null && file.expiredAt.getTime() <= Date.now())
-  ) {
+function fileMatchesTarget(file: ImportFile, target: Target) {
+  return (
+    String(file.user) === target.userId &&
+    (file.tenantId ?? null) === (target.tenantId ?? null) &&
+    file.conversationId === target.conversationId &&
+    file.messageId === target.messageId &&
+    file.context === FileContext.image_generation &&
+    file.storageOperations?.deleting == null &&
+    file.storageOperations?.deletionPending !== true &&
+    (file.expiredAt == null || file.expiredAt.getTime() > Date.now())
+  );
+}
+
+function checkFile(file: ImportFile, target: Target) {
+  if (!fileMatchesTarget(file, target)) {
     throw new Error('image_file_unavailable');
   }
   return file;
@@ -186,6 +221,98 @@ function attachedDisplayId(files: unknown[] | undefined, originalId: string) {
       return file.file_id;
   }
   return undefined;
+}
+
+const mcpImageLeaseKey = (id: string) => 'mcp-image:' + id;
+
+/** Reattach locally saved files after authorization, before returning the public transcript. */
+export async function restoreMCPImageAttachments<T extends HistoryMessage>(
+  rows: T[],
+  scope: HistoryScope,
+  deps: HistoryDependencies,
+): Promise<Omit<T, 'mcpImageJobs'>[]> {
+  const jobs = new Map<string, Target>();
+  const messages = rows.map((row) => {
+    if (!Object.prototype.hasOwnProperty.call(row, 'mcpImageJobs')) return row;
+    const { mcpImageJobs, ...message } = row;
+    if (
+      message.isCreatedByUser !== false ||
+      message.isUserSubmitted === true ||
+      message.conversationId !== scope.conversationId ||
+      (message.tenantId ?? null) !== (scope.tenantId ?? null)
+    ) {
+      return message;
+    }
+    for (const job of mcpImageJobs ?? []) {
+      if (
+        uuid.test(job.fileId) &&
+        job.key &&
+        job.toolCallId &&
+        !attachedDisplayId(message.attachments, job.fileId)
+      ) {
+        jobs.set(job.fileId, {
+          ...scope,
+          messageId: message.messageId,
+          toolCallId: job.toolCallId,
+          bindingKey: job.key,
+        });
+      }
+    }
+    return message;
+  });
+  if (jobs.size === 0) return messages;
+
+  try {
+    const messageIds = [...new Set(Array.from(jobs.values(), (target) => target.messageId))];
+    const files = await deps.getMCPImageFiles(scope, messageIds, [...jobs.keys()]);
+    const byId = new Map(files.map((file) => [file.file_id, file]));
+    const repaired = new Set<string>();
+    await Promise.all(
+      Array.from(jobs, async ([fileId, target]) => {
+        const original = byId.get(fileId);
+        if (!original || !fileMatchesTarget(original, target)) return;
+        const linked = byId.get(original.metadata?.imageDisplayFileId ?? '');
+        const display =
+          linked?.metadata?.imageOriginalFileId === fileId && fileMatchesTarget(linked, target)
+            ? linked
+            : original;
+        if (display.type === 'image/tiff' || !rasterTypes.has(display.type)) return;
+        try {
+          await withLease(deps.lease, mcpImageLeaseKey(fileId), async (fence) => {
+            await fence();
+            await deps.attachMCPImage(target, asMCPImageFile(display), fileId);
+            repaired.add(target.messageId);
+          });
+        } catch (error) {
+          if (!(error instanceof ResourcePermissionsBusyError)) {
+            logger.warn(
+              '[mcp-image] Failed to restore a stored attachment',
+              getSafeErrorMetadata(error),
+            );
+          }
+        }
+      }),
+    );
+    if (repaired.size === 0) return messages;
+    const updated = await deps.getMessages(
+      {
+        user: scope.userId,
+        conversationId: scope.conversationId,
+        messageId: { $in: [...repaired] },
+      },
+      'messageId files attachments mcpImagePickups updatedAt -_id',
+    );
+    const byMessageId = new Map(updated.map((message) => [message.messageId, message]));
+    return messages.map((message) => {
+      const stored = byMessageId.get(message.messageId);
+      if (!stored) return message;
+      const { files, attachments, mcpImagePickups, updatedAt } = stored;
+      return { ...message, files, attachments, mcpImagePickups, updatedAt };
+    });
+  } catch (error) {
+    logger.warn('[mcp-image] Failed to read stored attachments', getSafeErrorMetadata(error));
+    return messages;
+  }
 }
 
 async function readOriginal(req: StorageRequest, file: ImportFile, deps: ImageStorageDependencies) {
@@ -242,8 +369,8 @@ async function store(
   if (displayId) {
     const display = displayId === fileId ? existing : await deps.findFileById(displayId);
     if (!existing || !display) throw new Error('image_file_unavailable');
-    checkFile(existing, target, tenantId);
-    checkFile(display, target, tenantId);
+    checkFile(existing, target);
+    checkFile(display, target);
     return attachmentId && messageFileId ? asMCPImageFile(display) : attachDisplay(display);
   }
 
@@ -257,7 +384,7 @@ async function store(
   let originalFile = existing;
   let preparedDisplay: GeneratedImage | undefined;
   if (originalFile) {
-    checkFile(originalFile, target, tenantId);
+    checkFile(originalFile, target);
   } else {
     const prepared = await prepare(input, mime, config, deps.resizeImageBuffer);
     preparedDisplay = prepared.display;
@@ -279,7 +406,7 @@ async function store(
   if (previewId) {
     const preview = await deps.findFileById(previewId);
     if (preview) {
-      checkFile(preview, target, tenantId);
+      checkFile(preview, target);
       if (preview.metadata?.imageOriginalFileId !== fileId) {
         throw new Error('image_file_unavailable');
       }
@@ -352,7 +479,7 @@ export function createMCPImageStorage(
       if (!data.length || data.length > MAX_IMAGE_BYTES || data.toString('base64') !== match[2]) {
         throw new Error('image_content_invalid');
       }
-      return withLease(deps.lease, 'mcp-image:' + input.fileId, (fence) =>
+      return withLease(deps.lease, mcpImageLeaseKey(input.fileId), (fence) =>
         store(
           {
             userId: input.user.id,

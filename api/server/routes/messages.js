@@ -37,6 +37,7 @@ const {
   resolveMessagesPageSize,
   awaitPageSize,
   withMessageToolCallPreviews,
+  restoreMCPImageAttachments,
 } = require('@librechat/api');
 const subagentThreadTaskStore = require('~/server/services/Endpoints/agents/subagentThreadStore');
 const { getAppConfig } = require('~/server/services/Config');
@@ -70,6 +71,16 @@ const filterFeedbackContent = createContentFilter({
   extract: (req) => extractFeedbackContent(req.body),
 });
 const toolCallPreviewDeps = { getAppConfig };
+const imageHistoryDeps = {
+  getMessages: db.getMessages,
+  getMCPImageFiles: db.getMCPImageFiles,
+  attachMCPImage: db.attachMCPImage,
+  lease: {
+    acquireResourceLock: db.acquireResourceLock,
+    renewResourceLock: db.renewResourceLock,
+    releaseResourceLock: db.releaseResourceLock,
+  },
+};
 const readToolCallPart = createToolCallPartHandler({
   getMessages: db.getMessages,
   validate: (req) => createMessageRequestValidation(req, { activeJobMessageRead: true }),
@@ -556,7 +567,7 @@ router.get('/:conversationId', prepareMessageRequestValidation, async (req, res)
     // This intentionally starts a user-scoped read before validation resolves;
     // the response remains gated on validation success below.
     const messagesPromise = validation.shouldFetchMessages
-      ? db.getMessages({ conversationId, user: req.user.id }, CLIENT_MESSAGE_SELECT).then(
+      ? db.getMessagesForImageRecovery({ conversationId, user: req.user.id }).then(
           (messages) => ({ messages }),
           (error) => ({ error }),
         )
@@ -572,7 +583,11 @@ router.get('/:conversationId', prepareMessageRequestValidation, async (req, res)
       throw messagesResult.error;
     }
 
-    const messages = messagesResult?.messages ?? [];
+    const messages = await restoreMCPImageAttachments(
+      messagesResult?.messages ?? [],
+      { userId: req.user.id, tenantId: req.user.tenantId, conversationId },
+      imageHistoryDeps,
+    );
     res.status(200).json(await previewToolCalls(messages));
   } catch (error) {
     logger.error('Error fetching messages:', error);

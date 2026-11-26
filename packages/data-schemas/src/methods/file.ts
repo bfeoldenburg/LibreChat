@@ -416,6 +416,11 @@ export function createFileMethods(mongoose: typeof import('mongoose')): {
     query: ResponseArtifactQuery,
   ) => Promise<ResponseArtifactFile[] | null>;
   findFileById: (file_id: string, options?: Record<string, unknown>) => Promise<IMongoFile | null>;
+  getMCPImageFiles: (
+    scope: { userId: string; tenantId?: string; conversationId: string },
+    messageIds: string[],
+    originalIds: string[],
+  ) => Promise<IMongoFile[]>;
   getFiles: (
     filter: FilterQuery<IMongoFile>,
     _sortOptions?: Record<string, SortOrder> | null,
@@ -659,6 +664,28 @@ export function createFileMethods(mongoose: typeof import('mongoose')): {
   ): Promise<IMongoFile | null> {
     const File = mongoose.models.File as Model<IMongoFile>;
     return File.findOne({ file_id, ...options }).lean<IMongoFile>();
+  }
+
+  /** One batch read for the stored originals and display versions of bound jobs. */
+  async function getMCPImageFiles(
+    scope: { userId: string; tenantId?: string; conversationId: string },
+    messageIds: string[],
+    originalIds: string[],
+  ) {
+    const File = mongoose.models.File as Model<IMongoFile>;
+    return File.find({
+      user: scope.userId,
+      tenantId: scope.tenantId ?? null,
+      conversationId: scope.conversationId,
+      messageId: { $in: messageIds },
+      context: FileContext.image_generation,
+      $or: [
+        { file_id: { $in: originalIds } },
+        { 'metadata.imageOriginalFileId': { $in: originalIds } },
+      ],
+    })
+      .select('-text -textPreview')
+      .lean<IMongoFile[]>();
   }
 
   /** Select fields for query projection - 0 to exclude, 1 to include */
@@ -2018,6 +2045,7 @@ export function createFileMethods(mongoose: typeof import('mongoose')): {
     listRunArtifacts,
     readResponseArtifacts: (scope, query) => readResponseArtifactCatalog(mongoose, scope, query),
     findFileById,
+    getMCPImageFiles,
     getFiles,
     getProjectFiles,
     getAvailableProjectFiles,

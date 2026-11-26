@@ -550,7 +550,7 @@ const SERVER_AUTHORED_SAMPLED_RESPONSE = {
   ...SERVER_AUTHORED_MESSAGE_FILTER,
 } as const;
 
-export const CLIENT_MESSAGE_SELECT: string = [
+const CLIENT_MESSAGE_FIELDS = [
   '-_id',
   '-__v',
   '-user',
@@ -561,7 +561,6 @@ export const CLIENT_MESSAGE_SELECT: string = [
   '-summaryTokenCount',
   '-privateText',
   '-privateTextTokens',
-  '-mcpImageJobs',
   '-contextMeta',
   '-langfuseCentralTraceExportEnabled',
   '-langfuseSampled',
@@ -580,6 +579,10 @@ export const CLIENT_MESSAGE_SELECT: string = [
   '-attachments.web_search.organic.highlights',
   '-attachments.web_search.topStories.highlights',
 ].join(' ');
+
+export const CLIENT_MESSAGE_SELECT: string = CLIENT_MESSAGE_FIELDS + ' -mcpImageJobs';
+/** Server-only projection for reconciling already stored MCP images on a history read. */
+const MCP_IMAGE_HISTORY_SELECT = CLIENT_MESSAGE_FIELDS + ' +mcpImageJobs';
 
 interface MessageQueryOptions {
   limit?: number;
@@ -959,6 +962,10 @@ export interface MessageMethods {
     select?: string,
     options?: MessageQueryOptions,
   ): Promise<IMessage[]>;
+  getMessagesForImageRecovery(filter: {
+    user: string;
+    conversationId: string;
+  }): Promise<IMessage[]>;
   getMessagesForSubagentThreadView(input: {
     user: string;
     conversationId: string;
@@ -978,7 +985,7 @@ export interface MessageMethods {
   findMCPImageJob(scope: MCPImageScope, key: string): Promise<MCPImageJobTarget | null>;
   settleMCPImagePickup(target: MCPImageTarget & { toolCallId: string }): Promise<void>;
   attachMCPImage(
-    target: MCPImageTarget & { toolCallId?: string },
+    target: MCPImageTarget & { toolCallId?: string; bindingKey?: string },
     image: ImageFile,
     originalFileId: string,
   ): Promise<boolean>;
@@ -3106,6 +3113,10 @@ export function createMessageMethods(
     }
   }
 
+  async function getMessagesForImageRecovery(filter: { user: string; conversationId: string }) {
+    return getMessages(filter, MCP_IMAGE_HISTORY_SELECT);
+  }
+
   /**
    * Reads the fixed public child-thread projection and truncates text inside
    * MongoDB so oversized persisted messages are never materialized by the API.
@@ -4363,7 +4374,7 @@ export function createMessageMethods(
 
   /** Adds one native display file and its renderable attachment to the same message. */
   async function attachMCPImage(
-    target: MCPImageTarget & { toolCallId?: string },
+    target: MCPImageTarget & { toolCallId?: string; bindingKey?: string },
     image: ImageFile,
     originalFileId: string,
   ) {
@@ -4401,6 +4412,15 @@ export function createMessageMethods(
       {
         ...imageMessageFilter(target, 'attachMCPImage'),
         messageId: target.messageId,
+        ...(target.bindingKey != null && {
+          mcpImageJobs: {
+            $elemMatch: {
+              key: target.bindingKey,
+              fileId: originalFileId,
+              toolCallId: target.toolCallId,
+            },
+          },
+        }),
         $or: [missingImage('files'), missingImage('attachments')],
       },
       [
@@ -4663,6 +4683,7 @@ export function createMessageMethods(
     claimSubagentTaskResult,
     releaseSubagentTaskResultClaim,
     getMessages,
+    getMessagesForImageRecovery,
     getConversationTraceRefs,
     hasSampledTraceMessage,
     getMessagesForSubagentThreadView,
