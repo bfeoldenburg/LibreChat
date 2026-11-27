@@ -221,6 +221,7 @@ it.each(['upscale_image', 'outpaint_image', 'custom_resize'])(
       fileIds,
       expect.anything(),
       undefined,
+      undefined,
     );
     expect(h.invokeTool.mock.calls[0][1].requestMeta?.()).toMatchObject({
       'librechat/image-input': 'aW1hZ2U=',
@@ -248,6 +249,8 @@ it.each(['get_image_info', 'read_dimensions'])(
       mcpSettings: { mediaImageAttachmentTools },
     });
     const info = { width: 800, height: 600, mime_type: 'image/png' };
+    const first = { fileId: 'first-image', conversationId, messageId: 'earlier-answer' };
+    const second = { fileId: 'second-image', conversationId, messageId: 'later-answer' };
     h.invokeTool.mockImplementation(async () => [JSON.stringify(info), undefined]);
     const call = createMCPImageInvoker({
       invokeTool: h.invokeTool,
@@ -257,7 +260,15 @@ it.each(['get_image_info', 'read_dimensions'])(
     const invocation = {
       ...h.invocation,
       toolName,
-      toolArguments: {},
+      toolArguments: { image_reference: 'first' },
+      requestScopedConnections: {
+        connections: new Map(),
+        pending: new Map(),
+        mediaCompletedImages: new Map([
+          ['first', first],
+          ['second', second],
+        ]),
+      },
       serverConfig: {
         source: 'yaml' as const,
         type: 'streamable-http' as const,
@@ -272,6 +283,18 @@ it.each(['get_image_info', 'read_dimensions'])(
     expect(h.invokeTool.mock.calls[0][1].requestMeta?.()).toEqual({
       'librechat/image-input': 'aW1hZ2U=',
     });
+    expect(loadInput).toHaveBeenCalledWith(
+      expect.any(Object),
+      [],
+      expect.anything(),
+      undefined,
+      first,
+    );
+    for (const toolArguments of [{}, { image_reference: 'unknown' }]) {
+      const result = await call(h.manager, { ...invocation, toolArguments }, context);
+      expect(result?.[0]).toContain('image_input_unavailable');
+    }
+    expect(h.invokeTool).toHaveBeenCalledTimes(1);
     expect(h.deps.bindJob).not.toHaveBeenCalled();
     expect(h.deps.saveImage).not.toHaveBeenCalled();
 
@@ -320,6 +343,14 @@ it('marks a bound pending image for any configured image job tool name', async (
     {
       ...h.invocation,
       toolName,
+      toolArguments: { image_reference: 'earlier' },
+      requestScopedConnections: {
+        connections: new Map(),
+        pending: new Map(),
+        mediaCompletedImages: new Map([
+          ['earlier', { fileId: 'first-image', conversationId, messageId: 'earlier-answer' }],
+        ]),
+      },
       serverConfig: { source: 'yaml', type: 'streamable-http', url: 'http://media.invalid' },
     },
     context,

@@ -33,6 +33,7 @@ import type {
 import type { AuthIdentityContext } from '~/utils/identity';
 import type { GraphTokenResolver } from '~/utils/graph';
 import type { FlowStateManager } from '~/flow/manager';
+import type { MCPCompletedImage } from '../input';
 import type { RequestBody } from '~/types/http';
 import type * as o from '~/mcp/oauth/types';
 
@@ -339,6 +340,8 @@ export interface UserConnectionContext {
 export interface RequestScopedMCPConnectionStore {
   /** Uploaded file IDs captured from the current chat turn. */
   mediaInputFileIds?: readonly string[];
+  /** Host-delivered images on the conversation branch selected for this request. */
+  mediaCompletedImages?: ReadonlyMap<string, MCPCompletedImage>;
   connections: Map<string, unknown>;
   pending: Map<string, Promise<unknown>>;
   disposeConnection?: (connectionKey: string, connection: unknown) => Promise<void>;

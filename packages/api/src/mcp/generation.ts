@@ -11,6 +11,7 @@ import type {
 } from './types';
 import type { AgentMCPToolInvoker } from './agent';
 import type { ImageStorageInput } from './images';
+import type { MCPCompletedImage } from './input';
 import { isMCPToolResultError, markMCPToolResultError } from './status';
 import { formatToolContent } from './parsers';
 
@@ -77,6 +78,7 @@ type Dependencies = {
     fileIds: readonly string[],
     config: AppConfig,
     signal?: AbortSignal,
+    image?: MCPCompletedImage,
   ) => Promise<string | undefined>;
 };
 type LookupDependencies = Pick<Dependencies, 'getConvo' | 'findJob' | 'getAppConfig' | 'saveImage'>;
@@ -180,7 +182,7 @@ function lookupError(
 ): FormattedToolResponse {
   const messages = {
     image_input_unavailable:
-      'Genau ein PNG-, JPEG- oder WebP-Bild bis 4 MiB an die aktuelle Nachricht anhängen.',
+      'Das Bild ist für diesen Aufruf nicht verfügbar. Verwende die Referenz eines fertigen Bildes in diesem Chat-Zweig oder hänge genau ein PNG-, JPEG- oder WebP-Bild bis 4 MiB an.',
     job_unavailable: 'Dieser Bildauftrag ist nicht verfügbar. Keinen Ersatzauftrag starten.',
     invalid_parameters: 'Nur die öffentliche Auftragsreferenz job_reference angeben.',
     backend_unavailable:
@@ -543,13 +545,20 @@ export function createMCPImageInvoker({
         return lookupError(toolName, 'image_input_unavailable');
       }
       const signal = invocation.options?.signal;
+      const request = invocation.requestScopedConnections;
+      const args = invocation.toolArguments;
+      const reference =
+        args && typeof args === 'object' && 'image_reference' in args
+          ? args.image_reference
+          : undefined;
+      const image =
+        typeof reference === 'string' ? request?.mediaCompletedImages?.get(reference) : undefined;
+      const fileIds = request?.mediaInputFileIds ?? [];
+      if (!image && (reference != null || fileIds.length === 0)) {
+        return lookupError(toolName, 'image_input_unavailable');
+      }
       try {
-        imageInput = await deps.loadInput(
-          scope,
-          invocation.requestScopedConnections?.mediaInputFileIds ?? [],
-          config,
-          signal,
-        );
+        imageInput = await deps.loadInput(scope, fileIds, config, signal, image);
       } catch {
         signal?.throwIfAborted();
       }

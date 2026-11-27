@@ -2,8 +2,9 @@ import { logger } from '@librechat/data-schemas';
 import { Constants } from 'librechat-data-provider';
 
 import type { MCPRuntimeRequestBody, RequestScopedMCPConnectionStore } from './types';
+import type { MCPImageHistoryRow } from './input';
 import type { RequestBody } from '~/types';
-import { readMCPImageFileIds } from './input';
+import { collectMCPCompletedImages, readMCPImageFileIds } from './input';
 
 export type { MCPRuntimeRequestBody } from './types';
 
@@ -257,6 +258,38 @@ function attachResponseCleanup(context: MCPRequestContext, res?: MCPResponseLike
 /** The request's context if one was opened for it. Never opens one. */
 export function findMCPRequestContext(req?: object): MCPRequestContext | undefined {
   return req ? contexts.get(req) : undefined;
+}
+
+export function bindMCPCompletedImages(
+  req: object | undefined,
+  rows: readonly MCPImageHistoryRow[],
+  conversationId: string,
+  parentMessageId: string | null,
+): void {
+  const context = findMCPRequestContext(req);
+  if (!context || context.cleanupStarted) return;
+  context.mediaCompletedImages =
+    parentMessageId && rows.length
+      ? collectMCPCompletedImages(rows, conversationId, parentMessageId)
+      : undefined;
+}
+
+export function getMCPImageCompletionContext(req?: object): string | undefined {
+  const images = findMCPRequestContext(req)?.mediaCompletedImages;
+  if (!images?.size) return;
+  const results = Array.from(images, ([image_reference, image], index) => ({
+    image_number: index + 1,
+    image_reference,
+    status: 'image_ready',
+    tool_call_id: image.toolCallId,
+    width: image.width,
+    height: image.height,
+  }));
+  return [
+    'Image jobs completed in this conversation branch, in conversation order. These results supersede queued or running status for the same tool call.',
+    JSON.stringify(results),
+    'When calling an image tool on a generated image, pass its image_reference. Ask which image the user means if the conversation does not identify it. For a new upload, omit image_reference.',
+  ].join('\n');
 }
 
 export function getMCPRequestContext(

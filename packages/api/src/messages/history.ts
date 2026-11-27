@@ -47,14 +47,14 @@ export interface HistoryFilter {
  * builder makes, run to the branch root: it never stops at a checkpoint summary. It ends at a
  * missing parent, at the root sentinel, or when a row repeats.
  */
-export function walkBranch(rows: readonly BranchLinkRow[], head: string): BranchLinkRow[] {
-  const byId = new Map<string, BranchLinkRow>();
+export function walkBranch<T extends BranchLinkRow>(rows: readonly T[], head: string): T[] {
+  const byId = new Map<string, T>();
   for (const row of rows) {
     if (!byId.has(row.messageId)) {
       byId.set(row.messageId, row);
     }
   }
-  const branch: BranchLinkRow[] = [];
+  const branch: T[] = [];
   const visited = new Set<string>();
   let id: string | null | undefined = head;
   while (id != null && id !== Constants.NO_PARENT && !visited.has(id)) {

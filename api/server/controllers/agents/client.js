@@ -24,6 +24,8 @@ const {
   formatMemoryContext,
   createCachedTokenCounter,
   applyContextToAgent,
+  bindMCPCompletedImages,
+  getMCPImageCompletionContext,
   isMemoryAgentEnabled,
   recordCollectedUsage,
   resolveRunUsageContext,
@@ -2371,7 +2373,16 @@ class AgentClient extends BaseClient {
       });
       return [];
     }
-    return super.loadHistory(conversationId, parentMessageId);
+    const messages = await super.loadHistory(conversationId, parentMessageId);
+    if (this.options.req?.config?.mcpSettings?.mediaImageAttachmentTools) {
+      bindMCPCompletedImages(
+        this.options.req,
+        this.loadedHistoryRows ?? [],
+        conversationId,
+        parentMessageId,
+      );
+    }
+    return messages;
   }
 
   async buildMessages(messages, parentMessageId, _buildOptions, opts) {
@@ -3090,6 +3101,7 @@ class AgentClient extends BaseClient {
      */
     const ephemeralAgent = this.options.req.body.ephemeralAgent;
     const mcpManager = getMCPManager();
+    const imageCompletionContext = getMCPImageCompletionContext(this.options.req);
 
     const prepareRuntimeAgent = async (
       { agent, agentId },
@@ -3098,6 +3110,9 @@ class AgentClient extends BaseClient {
     ) => {
       normalizeInstructions(agent);
       const agentRunContextParts = [sharedRunContext];
+      if (imageCompletionContext && agent === this.options.agent) {
+        agentRunContextParts.push(imageCompletionContext);
+      }
       const agentMemoryContexts = [];
       const agentHasMemory = agentHasInlineMemoryTools(agent);
       if (agentId === this.options.agent.id || memoryAgentEnabled || agentHasMemory) {

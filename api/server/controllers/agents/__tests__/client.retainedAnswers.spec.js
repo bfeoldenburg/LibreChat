@@ -64,7 +64,8 @@ jest.mock('~/config', () => ({
 const { Constants, ContentTypes, EModelEndpoint } = require('librechat-data-provider');
 const { getMessages } = require('~/models');
 const AgentClient = require('../client');
-const { applyRetainedAnswers, GenerationJobManager } = jest.requireActual('@librechat/api');
+const { applyRetainedAnswers, GenerationJobManager, getMCPRequestContext } =
+  jest.requireActual('@librechat/api');
 const { formatAgentMessages } = jest.requireActual('@librechat/agents');
 
 async function buildPrompt(client, rows, parent) {
@@ -215,6 +216,27 @@ describe('AgentClient retained answers', () => {
     jest.clearAllMocks();
     mockFormatInstructions.mockResolvedValue('');
     getMessages.mockResolvedValue([]);
+  });
+
+  it('reports image completion for the original call across a checkpoint without another history read', async () => {
+    const client = makeClient();
+    const req = client.options.req;
+    req.config.mcpSettings = { mediaImageAttachmentTools: { media: { get_image_info: 'read' } } };
+    const fileId = 'bc14b3b8-458e-456f-8677-f2da2b6f027e';
+    const rows = compactedBranch();
+    rows.find((row) => row.messageId === 'a1').attachments = [
+      { file_id: fileId, toolCallId: 'generating-call', metadata: { mcpImage: true } },
+    ];
+    getMessages.mockResolvedValue(rows);
+    getMCPRequestContext(req);
+
+    const history = await client.loadHistory('convo-123', 'a2');
+    expect(history.map((row) => row.messageId)).toEqual(['a2']);
+    await client.buildMessages([...history, latestUserMessage()], 'u3', {});
+    expect(getMessages).toHaveBeenCalledTimes(1);
+    expect(client.options.agent.additional_instructions).toContain(
+      `"image_reference":"mcp-image-${fileId}","status":"image_ready","tool_call_id":"generating-call"`,
+    );
   });
 
   it.each([false, true])(
