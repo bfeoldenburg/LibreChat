@@ -56,6 +56,8 @@ export { createMCPImageInput } from './mcp/input';
 export * from './mcp/images';
 export * from './files/generatedStorage';
 export * from './mcp/reinitialize';
+export * from './mcp/readiness';
+export * from './mcp/connect';
 export * from './mcp/icons';
 /* Utilities */
 export * from './mcp/utils';

@@ -16,6 +16,16 @@ export type {
   ToolRenderProps,
 } from './components/Part';
 
+export {
+  AnimatedText,
+  createFadePlugin,
+  FADE_DURATION_MS,
+  FADE_STAGGER_MS,
+  FADE_STAGGER_MAX_MS,
+  FADE_HYDRATION_THRESHOLD,
+} from './components/fade';
+export type { FadePlugin } from './components/fade';
+
 /** Composer: the chat input, its controls and the steering queue. */
 export { default as BrowserAudio } from './components/composer/Audio';
 export type { BrowserAudioProps } from './components/composer/Audio';
@@ -129,6 +139,8 @@ export { getMessageAriaLabel, getHeaderPrefixForScreenReader } from './component
 export { default as PhaseLabel, FOLD_EASING } from './components/parts/PhaseLabel';
 export { default as ToolGroupHeader } from './components/parts/group/Header';
 export type { ToolGroupHeaderProps } from './components/parts/group/Header';
+export { default as ToolGroupBody } from './components/parts/group/Body';
+export type { ToolGroupBodyProps } from './components/parts/group/Body';
 
 /** Parts: the leaf components and row classes tool cards share. */
 export { default as Stdout } from './components/parts/Stdout';
@@ -251,7 +263,8 @@ export type { ChatPaneView, ChatPaneColumn } from './components/pane/view';
 export { default as ChatScreen } from './components/pane/Screen';
 export { default as ChatStarters } from './components/pane/starters';
 export { getChatPaneChrome } from './components/pane/chrome';
-export { loadScreenMessages } from './components/pane/load';
+export { loadScreenMessages, loadFollowedThread } from './components/pane/load';
+export type { FollowedThreadProps } from './components/pane/Followed';
 export type {
   ChatScreenProps,
   ChatScreenComposerProps,
@@ -294,6 +307,7 @@ export {
 export { default as SubagentConversation } from './components/subagents/conversation';
 export { default as SharedSubagentActivityDialog } from './components/subagents/shared';
 export { loadSubagentThreadPanel } from './components/subagents/load';
+export { loadSideChatPanel } from './components/side/load';
 
 /** Part helpers moved from the app: copy and action buttons, language icons, expand/collapse. */
 export {
@@ -364,3 +378,5 @@ export {
   getSourceDomains,
   getUniqueDomainSources,
 } from './components/parts/sources';
+
+export { HiddenAttachmentsContext, useVisibleAttachments } from './components/parts/media';
