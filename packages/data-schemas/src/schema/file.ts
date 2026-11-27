@@ -3,6 +3,7 @@ import { FileContext, FileSources } from 'librechat-data-provider';
 import type { RunFileProvenance, CodeOutputProvenance } from 'librechat-data-provider';
 import type { IMongoFile } from '~/types';
 import { codeEnvRefMapSchema, codeEnvRefSchema } from './codeEnvRef';
+import { fileGenerationDetailsSchema } from './generation';
 
 const runFileProvenanceSchema = new Schema<RunFileProvenance>(
   {
@@ -159,6 +160,8 @@ const file: Schema<IMongoFile> = new Schema(
     metadata: {
       imageOriginalFileId: { type: String },
       imageDisplayFileId: { type: String },
+      originalFileId: { type: String },
+      generation: { type: fileGenerationDetailsSchema, default: undefined },
       codeOutput: { type: codeOutputProvenanceSchema, default: undefined },
       runFile: {
         type: runFileProvenanceSchema,

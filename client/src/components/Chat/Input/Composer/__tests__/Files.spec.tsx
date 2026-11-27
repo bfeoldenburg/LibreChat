@@ -18,12 +18,14 @@ let mockFiles: TFile[] | undefined = [];
 let mockQueryState = { isLoading: false, isError: false };
 const mockRefetch = jest.fn();
 const mockFetchPreview = jest.fn();
+const mockFetchDownload = jest.fn();
+const mockUseFileDownload = jest.fn(() => ({ refetch: mockFetchDownload, isFetching: false }));
 
 jest.mock('~/data-provider', () => ({
   useGetFiles: () => ({ data: mockFiles, refetch: mockRefetch, ...mockQueryState }),
   useFilePreviewBlob: () => ({ refetch: mockFetchPreview }),
   useFilePreview: () => ({ refetch: jest.fn() }),
-  useFileDownload: () => ({ refetch: jest.fn() }),
+  useFileDownload: (...args: []) => mockUseFileDownload(...args),
   useSharedFileDownload: () => ({ refetch: jest.fn() }),
 }));
 
@@ -163,6 +165,35 @@ describe('FileGrid', () => {
       ).toBeInTheDocument(),
     );
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('downloads the same original when previewing a linked image in the file picker', async () => {
+    URL.createObjectURL = jest.fn(() => 'blob:preview');
+    URL.revokeObjectURL = jest.fn();
+    mockFiles = [
+      file({
+        file_id: 'preview',
+        filename: 'image-display.png',
+        type: 'image/png',
+        metadata: { imageOriginalFileId: 'original' },
+      }),
+      file({ file_id: 'original', filename: 'image-original.tiff', type: 'image/tiff' }),
+    ];
+    mockFetchPreview.mockResolvedValue({ data: new Blob(['preview']) });
+    mockFetchDownload.mockResolvedValue({ data: 'https://example.invalid/original.tiff' });
+    const anchor = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      expect(this.download).toBe('image-original.tiff');
+    });
+    renderGrid();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'com_ui_composer_preview_file:image-display.png' }),
+    );
+    const viewer = await screen.findByRole('dialog');
+    expect(mockUseFileDownload).toHaveBeenCalledWith('user-1', 'original', { source: 'local' });
+    fireEvent.click(within(viewer).getByRole('button', { name: 'Download' }));
+    await waitFor(() => expect(anchor).toHaveBeenCalledTimes(1));
   });
 
   it('attaches a file when its card is chosen, not when it is previewed', () => {

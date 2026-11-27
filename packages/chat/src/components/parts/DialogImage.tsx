@@ -10,6 +10,7 @@ import {
   useMediaQuery,
   useRemScale,
 } from '@librechat/client';
+import type { FileDetails, FileGenerationDetails } from 'librechat-data-provider';
 
 /** The lightbox is z-250 and not an OGDialog, so its tooltips would keep the default 150 and sit behind it. */
 const TOOLTIP_Z_INDEX = 300;
@@ -32,6 +33,10 @@ export default function DialogImage({
   src = '',
   downloadImage,
   args,
+  file,
+  preview,
+  generation,
+  isDownloading,
   triggerRef,
   showDetails = true,
   title,
@@ -46,6 +51,10 @@ export default function DialogImage({
     size?: string;
     [key: string]: unknown;
   };
+  file?: FileDetails;
+  preview?: FileDetails;
+  generation?: FileGenerationDetails;
+  isDownloading?: boolean;
   triggerRef?: React.RefObject<HTMLButtonElement>;
   /** Off for an uploaded file, which has no generation details to show. */
   showDetails?: boolean;
@@ -74,7 +83,7 @@ export default function DialogImage({
     }
     try {
       const response = await fetch(url, { method: 'HEAD' });
-      const contentLength = response.headers.get('Content-Length');
+      const contentLength = response.ok ? response.headers.get('Content-Length') : null;
 
       if (contentLength) {
         const bytes = parseInt(contentLength, 10);
@@ -84,6 +93,7 @@ export default function DialogImage({
       }
 
       const fullResponse = await fetch(url);
+      if (!fullResponse.ok) return null;
       const blob = await fullResponse.blob();
       const result = formatFileSize(blob.size);
       imageSizeCache.set(url, result);
@@ -218,11 +228,24 @@ export default function DialogImage({
   }, [resetZoom, onOpenChange, isOpen, zoom]);
 
   useEffect(() => {
-    if (isOpen && src) {
-      getImageSize(src).then(setImageSize);
+    if (isOpen) {
       resetZoom();
     }
-  }, [isOpen, src, getImageSize, resetZoom]);
+  }, [isOpen, src, resetZoom]);
+
+  useEffect(() => {
+    setImageSize(null);
+    if (!isOpen || !isPromptOpen || !showDetails || file?.bytes != null || preview || !src) {
+      return;
+    }
+    let current = true;
+    void getImageSize(src).then((size) => {
+      if (current) setImageSize(size);
+    });
+    return () => {
+      current = false;
+    };
+  }, [isOpen, isPromptOpen, showDetails, file?.bytes, preview, src, getImageSize]);
 
   useEffect(() => {
     if (zoom === 1) {
@@ -264,6 +287,25 @@ export default function DialogImage({
 
   // Reserve the side panel's width (w-80 = 20rem) only when it sits beside the image
   const getImageMaxWidth = () => (detailsBeside ? 'calc(90vw - 20rem)' : '90vw');
+
+  const prompt = generation?.prompt ?? args?.prompt;
+  const quality = generation?.quality ?? args?.quality;
+  const resolution = file?.width && file.height ? `${file.width} × ${file.height}` : args?.size;
+  const previewResolution =
+    preview?.width && preview.height ? `${preview.width} × ${preview.height}` : undefined;
+  const fileRows = [
+    { label: localize('com_ui_name'), value: file?.filename },
+    { label: localize('com_ui_file_mime_type'), value: file?.type },
+    {
+      label: localize(preview ? 'com_ui_image_original_resolution' : 'com_ui_image_resolution'),
+      value: resolution,
+    },
+    { label: localize('com_ui_image_preview_resolution'), value: previewResolution },
+    {
+      label: localize('com_ui_file_size'),
+      value: file?.bytes != null ? formatFileSize(file.bytes) : imageSize,
+    },
+  ].filter(({ value }) => value);
 
   return (
     <DialogPrimitive.Root open={isOpen} onOpenChange={onOpenChange}>
@@ -339,6 +381,8 @@ export default function DialogImage({
                   size="bare"
                   className="h-10 w-10"
                   aria-label={localize('com_ui_download')}
+                  disabled={isDownloading}
+                  aria-busy={isDownloading}
                 >
                   <ArrowDownToLine className="size-5" aria-hidden="true" />
                 </Button>
@@ -430,52 +474,59 @@ export default function DialogImage({
                 <div className="bg-border-medium mb-4 h-px"></div>
 
                 <div className="space-y-6">
-                  {/* Prompt Section */}
-                  <div>
-                    <h4 className="text-text-primary mb-2 text-sm font-medium">
-                      {localize('com_ui_prompt')}
-                    </h4>
-                    <div className="bg-surface-tertiary rounded-md p-3">
-                      <p className="text-text-primary text-sm leading-relaxed">
-                        {args?.prompt || 'No prompt available'}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Generation Settings */}
-                  <div>
-                    <h4 className="text-text-primary mb-3 text-sm font-medium">
-                      {localize('com_ui_generation_settings')}
-                    </h4>
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="text-text-primary text-sm">
-                          {localize('com_ui_size')}:
-                        </span>
-                        <span className="text-text-primary text-sm font-medium">
-                          {args?.size || 'Unknown'}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-text-primary text-sm">
-                          {localize('com_ui_quality')}:
-                        </span>
-                        <span
-                          className={`rounded px-2 py-1 text-xs font-medium capitalize ${getQualityStyles(args?.quality || '')}`}
+                  {fileRows.length > 0 && (
+                    <dl className="space-y-3">
+                      {fileRows.map(({ label, value }) => (
+                        <div
+                          key={label}
+                          className="text-text-primary flex justify-between gap-3 text-sm"
                         >
-                          {args?.quality || 'Standard'}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-text-primary text-sm">
-                          {localize('com_ui_file_size')}:
-                        </span>
-                        <span className="text-text-primary text-sm font-medium">
-                          {imageSize || 'Loading...'}
-                        </span>
+                          <dt className="shrink-0">{label}</dt>
+                          <dd className="min-w-0 text-end font-medium break-all">{value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  )}
+                  {prompt && (
+                    <div>
+                      <h4 className="text-text-primary mb-2 text-sm font-medium">
+                        {localize('com_ui_prompt')}
+                      </h4>
+                      <div className="bg-surface-tertiary rounded-md p-3">
+                        <p className="text-text-primary text-sm leading-relaxed wrap-break-word whitespace-pre-wrap">
+                          {prompt}
+                        </p>
                       </div>
                     </div>
-                  </div>
+                  )}
+
+                  {(generation?.steps != null || quality) && (
+                    <div>
+                      <h4 className="text-text-primary mb-3 text-sm font-medium">
+                        {localize('com_ui_generation_settings')}
+                      </h4>
+                      <dl className="space-y-3">
+                        {generation?.steps != null && (
+                          <div className="text-text-primary flex items-center justify-between text-sm">
+                            <dt>{localize('com_ui_generation_steps')}</dt>
+                            <dd className="font-medium">{generation.steps}</dd>
+                          </div>
+                        )}
+                        {quality && (
+                          <div className="flex items-center justify-between">
+                            <dt className="text-text-primary text-sm">
+                              {localize('com_ui_quality')}
+                            </dt>
+                            <dd
+                              className={`rounded px-2 py-1 text-xs font-medium capitalize ${getQualityStyles(quality)}`}
+                            >
+                              {quality}
+                            </dd>
+                          </div>
+                        )}
+                      </dl>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

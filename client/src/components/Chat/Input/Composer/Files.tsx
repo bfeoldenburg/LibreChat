@@ -1,7 +1,7 @@
 import { memo, useRef, useMemo, useState, useEffect } from 'react';
 import { Eye, Search } from 'lucide-react';
 import { getPreviewKind } from '@librechat/chat';
-import { apiBaseUrl } from 'librechat-data-provider';
+import { apiBaseUrl, getOriginalFileId } from 'librechat-data-provider';
 import { Button, IconButton, Spinner, useToastContext } from '@librechat/client';
 import { FilePreview, getFileType, DialogImage } from '@librechat/chat/components';
 import type { TFile } from 'librechat-data-provider';
@@ -10,9 +10,10 @@ import FilePreviewDialog, {
   formatBytes,
   getDisplayType,
 } from '~/components/Chat/Messages/Content/FilePreviewDialog';
+import useStoredFileDownload from '~/hooks/Files/useStoredFileDownload';
 import { useGetFiles, useFilePreviewBlob } from '~/data-provider';
 import { useLocalize, useOnline, useAuthContext } from '~/hooks';
-import { toAbsoluteFilePath, triggerDownload } from '~/utils';
+import { toAbsoluteFilePath } from '~/utils';
 
 export type FileView = 'all' | 'images' | 'documents';
 
@@ -247,6 +248,15 @@ export default function FileGrid({
      the list refreshing it and the preview opening. The link is the fallback. */
   const { user } = useAuthContext();
   const { refetch: fetchPreview } = useFilePreviewBlob(user?.id, previewing?.file_id);
+  const originalId = getOriginalFileId(previewing);
+  const originalName = originalId
+    ? files.find((file) => file.file_id === originalId)?.filename
+    : undefined;
+  const { download: downloadImage, isFetching: isDownloading } = useStoredFileDownload(
+    user?.id,
+    previewing,
+    originalName,
+  );
   const { showToast } = useToastContext();
   /* Read through a ref: `showToast` is a new function each render, and the
      preview effect must not refetch because of it. */
@@ -343,11 +353,8 @@ export default function FileGrid({
         triggerRef={previewTriggerRef}
         showDetails={false}
         title={previewing?.filename ?? undefined}
-        downloadImage={() => {
-          if (imageUrl != null) {
-            triggerDownload(imageUrl, previewing?.filename ?? 'image');
-          }
-        }}
+        downloadImage={downloadImage}
+        isDownloading={isDownloading}
       />
       <FilePreviewDialog
         open={previewKind === 'pdf'}

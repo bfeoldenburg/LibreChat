@@ -8,16 +8,15 @@ import {
   Spinner,
   useMediaQuery,
   TooltipAnchor,
-  useToastContext,
   AzureMinimalIcon,
   OpenAIMinimalIcon,
 } from '@librechat/client';
 import type { ColumnDef } from '@tanstack/react-table';
 import type { TFile } from 'librechat-data-provider';
-import { formatDate, getDownloadFilename, triggerDownload } from '~/utils';
+import useStoredFileDownload from '~/hooks/Files/useStoredFileDownload';
 import { TranslationKeys, useAuthContext, useLocalize } from '~/hooks';
 import { SortFilterHeader } from './SortFilterHeader';
-import { useFileDownload } from '~/data-provider';
+import { formatDate } from '~/utils';
 
 const contextMap: Record<any, TranslationKeys> = {
   [FileContext.avatar]: 'com_ui_avatar',
@@ -31,19 +30,9 @@ const contextMap: Record<any, TranslationKeys> = {
 
 function DownloadFileButton({ file }: { file: TFile }) {
   const { user } = useAuthContext();
-  const { showToast } = useToastContext();
   const localize = useLocalize();
   const label = localize('com_ui_download');
-  const { refetch, isFetching } = useFileDownload(user?.id, file.file_id, { source: file.source });
-
-  const download = async () => {
-    const { data, isError } = await refetch();
-    if (isError || !data) {
-      showToast({ status: 'error', message: localize('com_ui_download_error') });
-      return;
-    }
-    triggerDownload(data, getDownloadFilename(file.filename, file.file_id, file.source));
-  };
+  const { download, isFetching } = useStoredFileDownload(user?.id, file);
 
   return (
     <TooltipAnchor

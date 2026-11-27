@@ -159,6 +159,7 @@ export type MessagePartsImageProps = {
   className?: string;
   width?: number;
   height?: number;
+  file?: Partial<TFile>;
 };
 
 /** What a part asks the host's file preview dialog to show for an attached file. */

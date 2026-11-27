@@ -1,5 +1,6 @@
 import mongoose, { Schema } from 'mongoose';
 import type { IMessage } from '~/types/message';
+import { fileGenerationDetailsSchema } from './generation';
 import { agentFadingContextDefinition } from './fading';
 
 const messageSchema: Schema<IMessage> = new Schema(
@@ -141,7 +142,17 @@ const messageSchema: Schema<IMessage> = new Schema(
     },
     files: { type: [{ type: mongoose.Schema.Types.Mixed }], default: undefined },
     mcpImageJobs: {
-      type: [new Schema({ key: String, fileId: String, toolCallId: String }, { _id: false })],
+      type: [
+        new Schema(
+          {
+            key: String,
+            fileId: String,
+            toolCallId: String,
+            generation: { type: fileGenerationDetailsSchema, default: undefined },
+          },
+          { _id: false },
+        ),
+      ],
       default: undefined,
       select: false,
     },

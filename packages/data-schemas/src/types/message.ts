@@ -1,6 +1,7 @@
 import type {
   TFeedbackRating,
   TFeedbackTag,
+  FileGenerationDetails,
   TMessage,
   TReasoningOverride,
   UserSubmittedMessageFieldPath,
@@ -91,7 +92,12 @@ export interface IMessage extends Document {
   _meiliIndex?: boolean;
   files?: unknown[];
   /** Private job bindings written by the MCP image host. */
-  mcpImageJobs?: { key: string; fileId: string; toolCallId: string }[];
+  mcpImageJobs?: {
+    key: string;
+    fileId: string;
+    toolCallId: string;
+    generation?: FileGenerationDetails;
+  }[];
   mcpImagePickups?: NonNullable<TMessage['mcpImagePickups']>;
   plugin?: {
     latest?: string;

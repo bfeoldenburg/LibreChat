@@ -34,6 +34,10 @@ it('keeps both links and attaches only the display to the verified LibreChat mes
     });
     const association = { conversationId: message.conversationId, messageId: message.messageId };
     const target = { userId: owner, ...association };
+    const generation = { prompt: 'Blaue Blume', steps: 7 };
+    const binding = { key: 'media-ref', fileId: 'original', toolCallId: 'generate', generation };
+    expect(await messages.bindMCPImageJob(target, binding)).toBe(true);
+    expect(await messages.findMCPImageJob(target, binding.key)).toMatchObject(binding);
     const shared = {
       ...association,
       user,
@@ -50,7 +54,7 @@ it('keeps both links and attaches only the display to the verified LibreChat mes
         ...shared,
         file_id: 'original',
         filepath: '/images/original.png',
-        metadata: { imageDisplayFileId: 'display' },
+        metadata: { imageDisplayFileId: 'display', generation },
       },
       true,
     );
@@ -73,7 +77,7 @@ it('keeps both links and attaches only the display to the verified LibreChat mes
       embedded: false,
       file_id: 'display',
       filepath: '/images/display.png',
-      metadata: { imageOriginalFileId: 'original' },
+      metadata: { imageOriginalFileId: 'original', generation },
     };
     expect(
       await messages.attachMCPImage({ ...target, conversationId: 'other' }, attachment, 'original'),
@@ -83,7 +87,11 @@ it('keeps both links and attaches only the display to the verified LibreChat mes
     const stored = await messages.getMessage({ user: owner, messageId: message.messageId });
     expect(stored?.files).toEqual([attachment]);
     expect(stored?.text).toBe('Existing answer');
-    expect(await files.findFileById('original')).toMatchObject({ user, ...association });
+    expect(await files.findFileById('original')).toMatchObject({
+      user,
+      ...association,
+      metadata: { generation },
+    });
   });
 });
 

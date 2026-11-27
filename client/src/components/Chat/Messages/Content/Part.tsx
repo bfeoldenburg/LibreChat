@@ -698,6 +698,7 @@ const renderers: PartRenderers = {
           alignRight={isCreatedByUser}
           width={imageFile.width}
           height={imageFile.height}
+          file={imageFile}
         />
       );
     },

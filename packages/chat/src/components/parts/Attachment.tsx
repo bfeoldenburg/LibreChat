@@ -406,6 +406,7 @@ const ImageAttachment = memo(({ attachment }: { attachment: TAttachment }) => {
         imagePath: filepath ?? '',
         width,
         height,
+        file: 'file_id' in attachment ? attachment : undefined,
         className: 'mb-4',
       })}
     </div>

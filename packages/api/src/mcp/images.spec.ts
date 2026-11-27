@@ -2,7 +2,7 @@ import sharp from 'sharp';
 import { Readable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import type { AppConfig } from '@librechat/data-schemas';
-import type { ImageStorageDependencies } from './images';
+import type { ImageStorageDependencies, ImageStorageInput } from './images';
 import { createMCPImageStorage } from './images';
 
 const OWNER = 'a'.repeat(24);
@@ -71,13 +71,19 @@ function harness(preserveOriginal: boolean) {
   };
   const store = createMCPImageStorage(deps);
   const fileId = randomUUID();
-  const save = (input: Buffer, mime = 'image/png', userId = OWNER) =>
+  const save = (
+    input: Buffer,
+    mime = 'image/png',
+    userId = OWNER,
+    generation?: ImageStorageInput['generation'],
+  ) =>
     store({
       user: { id: userId },
       config,
       conversationId: 'conversation',
       messageId: 'result',
       fileId,
+      generation,
       dataUrl: `data:${mime};base64,${input.toString('base64')}`,
     });
   return { files, buffers, message, state, save, fileId, store, config };
@@ -114,12 +120,25 @@ it.each(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])(
 it('keeps an unmodified TIFF and a linked browser-capable PNG with preserveOriginal', async () => {
   const h = harness(true);
   const input = await pixels().tiff().toBuffer();
-  const display = await h.save(input, 'image/tiff');
+  const generation = { prompt: 'Blaue Blume', steps: 6 };
+  const display = await h.save(input, 'image/tiff', OWNER, generation);
   expect(display.file_id).not.toBe(h.fileId);
   expect(h.buffers.get(h.fileId)).toEqual(input);
   expect((await sharp(h.buffers.get(display.file_id)).metadata()).format).toBe('png');
   expect(h.files.get(h.fileId)?.metadata?.imageDisplayFileId).toBe(display.file_id);
   expect(display.metadata?.imageOriginalFileId).toBe(h.fileId);
+  expect(display.metadata).toMatchObject({
+    generation,
+    originalFile: {
+      filename: 'image-original',
+      type: 'image/tiff',
+      width: 20,
+      height: 12,
+      bytes: input.length,
+    },
+  });
+  expect(h.files.get(h.fileId)?.metadata?.generation).toEqual(generation);
+  expect(await h.save(input, 'image/tiff')).toEqual(display);
   expect(h.message.files).toEqual([display]);
   expect(h.files.size).toBe(2);
 });

@@ -170,6 +170,18 @@ export type CodeOutputProvenance = {
   sha256: string;
 };
 
+export type FileGenerationDetails = {
+  prompt?: string;
+  steps?: number;
+  quality?: string;
+};
+
+export function getOriginalFileId(file?: Pick<TFile, 'metadata'> | null): string | undefined {
+  return file?.metadata?.originalFileId ?? file?.metadata?.imageOriginalFileId;
+}
+
+export type FileDetails = Partial<Pick<TFile, 'filename' | 'type' | 'bytes' | 'width' | 'height'>>;
+
 export type TFile = {
   _id?: string;
   __v?: number;
@@ -230,6 +242,9 @@ export type TFile = {
     mcpImage?: boolean;
     imageOriginalFileId?: string;
     imageDisplayFileId?: string;
+    originalFileId?: string;
+    originalFile?: FileDetails;
+    generation?: FileGenerationDetails;
     runFile?: RunFileProvenance;
     codeOutput?: CodeOutputProvenance;
     fileIdentifier?: string;

@@ -3,6 +3,7 @@ import type {
   CodeEnvRef,
   CodeEnvRefMap,
   FileContext,
+  FileGenerationDetails,
   RunFileProvenance,
   TFile,
   TFileWorkspaceImports,
@@ -232,6 +233,8 @@ export interface IMongoFile extends Omit<Document, 'model'> {
   metadata?: {
     imageOriginalFileId?: string;
     imageDisplayFileId?: string;
+    originalFileId?: string;
+    generation?: FileGenerationDetails;
     runFile?: RunFileProvenance;
     /**
      * Code-environment cache pointer for files re-uploadable to

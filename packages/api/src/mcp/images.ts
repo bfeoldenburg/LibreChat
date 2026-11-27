@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { logger } from '@librechat/data-schemas';
 import { EModelEndpoint, FileContext } from 'librechat-data-provider';
+import type { FileGenerationDetails, ImageFile } from 'librechat-data-provider';
 import type { AppConfig, IMessage } from '@librechat/data-schemas';
-import type { ImageFile } from 'librechat-data-provider';
 import type { Readable } from 'node:stream';
 import type { GeneratedImage, GeneratedImageDependencies } from '~/files/generation';
 import type { ImageDownload } from './download';
@@ -28,7 +28,11 @@ const rasterTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp
 const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 
 type Owner = { id: string; role?: string; idOnTheSource?: string | null; tenantId?: string };
-type ImageLinks = { imageOriginalFileId?: string; imageDisplayFileId?: string };
+type ImageMetadata = {
+  imageOriginalFileId?: string;
+  imageDisplayFileId?: string;
+  generation?: FileGenerationDetails;
+};
 type ImportFile = {
   file_id: string;
   user: { toString(): string };
@@ -47,7 +51,7 @@ type ImportFile = {
   height?: number;
   expiredAt?: Date;
   storageOperations?: { deleting?: string; deletionPending?: boolean };
-  metadata?: ImageLinks;
+  metadata?: ImageMetadata;
 };
 type Target = {
   userId: string;
@@ -101,7 +105,7 @@ type SaveImageOptions = {
   association: {
     conversationId: string;
     messageId: string;
-    metadata: ImageLinks;
+    metadata: ImageMetadata;
   };
 };
 type ImageInput = { mime: string; data: Buffer } | { download: ImageDownload };
@@ -207,7 +211,8 @@ function checkFile(file: ImportFile, target: Target) {
   return file;
 }
 
-export function asMCPImageFile(file: ImportFile): ImageFile {
+export function asMCPImageFile(file: ImportFile, original: ImportFile): ImageFile {
+  const generation = original.metadata?.generation;
   const image = {
     user: String(file.user),
     file_id: file.file_id,
@@ -227,7 +232,15 @@ export function asMCPImageFile(file: ImportFile): ImageFile {
       mcpImage: true,
       ...(file.metadata?.imageOriginalFileId && {
         imageOriginalFileId: file.metadata.imageOriginalFileId,
+        originalFile: {
+          filename: original.filename,
+          type: original.type,
+          bytes: original.bytes,
+          width: original.width,
+          height: original.height,
+        },
       }),
+      ...(generation && { generation }),
     },
   };
   return image;
@@ -312,7 +325,7 @@ export async function restoreMCPImageAttachments<T extends HistoryMessage>(
         try {
           await withLease(deps.lease, mcpImageLeaseKey(fileId), async (fence) => {
             await fence();
-            await deps.attachMCPImage(target, asMCPImageFile(display), fileId);
+            await deps.attachMCPImage(target, asMCPImageFile(display, original), fileId);
             repaired.add(target.messageId);
           });
         } catch (error) {
@@ -355,6 +368,7 @@ async function store(
   config: AppConfig,
   deps: ImageStorageDependencies,
   fence: () => Promise<void>,
+  generation?: FileGenerationDetails,
 ) {
   const tenantId = user.tenantId;
   const [message, existing] = await Promise.all([
@@ -373,8 +387,8 @@ async function store(
   }
 
   const signal = 'download' in input ? input.download.signal : undefined;
-  const attachDisplay = async (display: ImportFile) => {
-    const image = asMCPImageFile(display);
+  const attachDisplay = async (display: ImportFile, original: ImportFile) => {
+    const image = asMCPImageFile(display, original);
     signal?.throwIfAborted();
     await fence();
     if (!(await deps.attachMCPImage(target, image, fileId))) {
@@ -390,7 +404,9 @@ async function store(
     if (!existing || !display) throw new Error('image_file_unavailable');
     checkFile(existing, target);
     checkFile(display, target);
-    return attachmentId && messageFileId ? asMCPImageFile(display) : attachDisplay(display);
+    return attachmentId && messageFileId
+      ? asMCPImageFile(display, existing)
+      : attachDisplay(display, existing);
   }
 
   const req = {
@@ -412,7 +428,7 @@ async function store(
       context: FileContext.image_generation,
       association: {
         ...association,
-        metadata: {},
+        metadata: generation ? { generation } : {},
       },
     };
     const setDisplay = (display: GeneratedImage | undefined) => {
@@ -483,13 +499,19 @@ async function store(
         file_id: previewId,
         filename: 'image-display',
         context: FileContext.image_generation,
-        association: { ...association, metadata: { imageOriginalFileId: fileId } },
+        association: {
+          ...association,
+          metadata: {
+            imageOriginalFileId: fileId,
+            ...(original.metadata?.generation && { generation: original.metadata.generation }),
+          },
+        },
       });
       if (!saved) throw new Error('Image display file record was not created');
       displayFile = saved;
     }
   }
-  return attachDisplay(displayFile);
+  return attachDisplay(displayFile, originalFile);
 }
 
 export type ImageStorageInput = {
@@ -500,6 +522,7 @@ export type ImageStorageInput = {
   toolCallId?: string;
   fileId: string;
   bindingKey?: string;
+  generation?: FileGenerationDetails;
 } & ({ dataUrl: string } | { download: ImageDownload });
 
 function parseImageInput(input: ImageStorageInput): ImageInput {
@@ -552,6 +575,7 @@ export function createMCPImageStorage(
           input.config,
           deps,
           fence,
+          input.generation,
         ),
       );
     };

@@ -1,6 +1,16 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import Image, { _resetImageCaches } from '../Image';
+
+const mockDownload = jest.fn();
+const mockUseFileDownload = jest.fn(() => ({ refetch: mockDownload, isFetching: false }));
+jest.mock('~/data-provider', () => ({
+  useFileDownload: (...args: []) => mockUseFileDownload(...args),
+}));
+jest.mock('~/hooks/AuthContext', () => ({
+  AuthContext: jest.requireActual('react').createContext({ user: { id: 'owner' } }),
+}));
+jest.mock('~/hooks/useLocalize', () => () => (key: string) => key);
 
 jest.mock('~/utils', () => ({
   cn: (...classes: (string | boolean | undefined | null)[]) =>
@@ -14,6 +24,7 @@ jest.mock('~/utils', () => ({
 }));
 
 jest.mock('librechat-data-provider', () => ({
+  ...jest.requireActual('librechat-data-provider'),
   apiBaseUrl: () => '',
 }));
 
@@ -21,12 +32,25 @@ jest.mock('@librechat/client', () => ({
   Skeleton: ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
     <div data-testid="skeleton" className={className} {...props} />
   ),
+  useToastContext: () => ({ showToast: jest.fn() }),
 }));
 
 jest.mock('@librechat/chat/components', () => ({
   ...jest.requireActual('@librechat/chat/components'),
-  DialogImage: ({ isOpen, src }: { isOpen: boolean; src: string }) =>
-    isOpen ? <div data-testid="dialog-image" data-src={src} /> : null,
+  DialogImage: ({
+    isOpen,
+    src,
+    downloadImage,
+  }: {
+    isOpen: boolean;
+    src: string;
+    downloadImage: () => void;
+  }) =>
+    isOpen ? (
+      <div data-testid="dialog-image" data-src={src}>
+        <button type="button" data-testid="download-image" onClick={downloadImage} />
+      </div>
+    ) : null,
 }));
 describe('Image', () => {
   const defaultProps = {
@@ -37,6 +61,29 @@ describe('Image', () => {
   beforeEach(() => {
     _resetImageCaches();
     jest.clearAllMocks();
+  });
+
+  it('downloads the linked original while displaying the preview', async () => {
+    mockDownload.mockResolvedValue({ data: 'https://example.invalid/original.tiff' });
+    const anchor = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      expect(this.download).toBe('original.tiff');
+    });
+    render(
+      <Image
+        {...defaultProps}
+        file={{
+          file_id: 'preview',
+          metadata: { originalFileId: 'original', originalFile: { filename: 'original.tiff' } },
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^View/ }));
+    expect(screen.getByTestId('dialog-image')).toHaveAttribute('data-src', defaultProps.imagePath);
+    expect(mockUseFileDownload).toHaveBeenCalledWith('owner', 'original', { source: undefined });
+    fireEvent.click(screen.getByTestId('download-image'));
+    await waitFor(() => expect(anchor).toHaveBeenCalledTimes(1));
   });
 
   describe('rendering without dimensions', () => {

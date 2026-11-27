@@ -1,7 +1,10 @@
-import React, { useState, useRef, useMemo, useEffect } from 'react';
+import React, { useState, useRef, useMemo, useEffect, useContext } from 'react';
 import { Skeleton } from '@librechat/client';
-import { apiBaseUrl } from 'librechat-data-provider';
 import { DialogImage } from '@librechat/chat/components';
+import { apiBaseUrl, getOriginalFileId } from 'librechat-data-provider';
+import type { TFile } from 'librechat-data-provider';
+import useStoredFileDownload from '~/hooks/Files/useStoredFileDownload';
+import { AuthContext } from '~/hooks/AuthContext';
 import { cn, toAbsoluteFilePath } from '~/utils';
 
 /** Max display height for chat images (Tailwind JIT class) */
@@ -24,6 +27,26 @@ function computeHeightStyle(w: number, h: number): React.CSSProperties {
   return { height: `min(45vh, ${(h / w) * 100}vw, ${(h / w) * IMAGE_MAX_W_PX}px)` };
 }
 
+function StoredImageDialog({
+  attachment,
+  ...dialog
+}: Omit<React.ComponentProps<typeof DialogImage>, 'file' | 'preview' | 'downloadImage'> & {
+  attachment: Partial<TFile>;
+}) {
+  const userId = useContext(AuthContext)?.user?.id;
+  const hasPreview = !!getOriginalFileId(attachment);
+  const { download, isFetching } = useStoredFileDownload(userId, attachment);
+  return (
+    <DialogImage
+      {...dialog}
+      file={hasPreview ? attachment.metadata?.originalFile : attachment}
+      preview={hasPreview ? attachment : undefined}
+      downloadImage={download}
+      isDownloading={isFetching}
+    />
+  );
+}
+
 const Image = ({
   imagePath,
   altText,
@@ -32,6 +55,7 @@ const Image = ({
   args,
   width,
   height,
+  file,
 }: {
   imagePath: string;
   altText: string;
@@ -46,6 +70,7 @@ const Image = ({
   };
   width?: number;
   height?: number;
+  file?: Partial<TFile>;
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -94,6 +119,15 @@ const Image = ({
   const hasDimensions = !!(dims?.width && dims?.height);
   const heightStyle = hasDimensions ? computeHeightStyle(dims.width, dims.height) : undefined;
   const showSkeleton = hasDimensions && !paintedUrls.has(absoluteImageUrl);
+  const dialog = {
+    isOpen,
+    onOpenChange: setIsOpen,
+    src: absoluteImageUrl,
+    args,
+    triggerRef,
+    generation: file?.metadata?.generation,
+  };
+  const hasStoredDownload = file?.file_id && (getOriginalFileId(file) || file.metadata?.generation);
 
   return (
     <div className={alignRight ? 'ms-auto' : undefined}>
@@ -123,14 +157,15 @@ const Image = ({
           )}
         />
       </button>
-      <DialogImage
-        isOpen={isOpen}
-        onOpenChange={setIsOpen}
-        src={absoluteImageUrl}
-        downloadImage={downloadImage}
-        args={args}
-        triggerRef={triggerRef}
-      />
+      {hasStoredDownload && file ? (
+        isOpen && <StoredImageDialog {...dialog} attachment={file} />
+      ) : (
+        <DialogImage
+          {...dialog}
+          file={file ?? { filename: altText }}
+          downloadImage={downloadImage}
+        />
+      )}
     </div>
   );
 };

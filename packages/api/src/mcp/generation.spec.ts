@@ -38,7 +38,7 @@ function harness(image = true) {
     serverName: 'bfe-medien',
     toolName: 'generate_image',
     provider: 'openai',
-    toolArguments: { prompt: 'Qwen prompt', message_id: 'forged' },
+    toolArguments: { prompt: 'Qwen prompt', settings: { steps: 7 }, message_id: 'forged' },
     flowManager: {} as Parameters<AgentMCPToolInvoker>[1]['flowManager'],
   };
   return {
@@ -80,6 +80,7 @@ it('binds a queued job and leaves catalog results on the existing path', async (
       key: JSON.stringify([h.invocation.serverName, 'f'.repeat(32)]),
       fileId: expect.any(String),
       toolCallId: context.toolCallId,
+      generation: { prompt: 'Qwen prompt', steps: 7 },
     },
   );
   expect(h.deps.saveImage).not.toHaveBeenCalled();
@@ -91,7 +92,12 @@ it('saves the existing result message before local image storage and reports sto
   const h = harness();
   h.deps.saveImage.mockImplementation(async (input) => {
     expect(h.deps.saveMessage).toHaveBeenCalledTimes(1);
-    expect(input).toMatchObject({ conversationId, messageId: context.messageId, dataUrl });
+    expect(input).toMatchObject({
+      conversationId,
+      messageId: context.messageId,
+      dataUrl,
+      generation: { prompt: 'Qwen prompt', steps: 7 },
+    });
     return { file_id: input.fileId } as ImageFile;
   });
   const first = await h.call(h.manager, h.invocation, context);

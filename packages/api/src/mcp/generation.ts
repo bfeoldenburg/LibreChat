@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { setTimeout } from 'node:timers/promises';
 import { createHash, randomUUID } from 'node:crypto';
+import type { FileGenerationDetails, ImageFile } from 'librechat-data-provider';
 import type { AppConfig, IUser } from '@librechat/data-schemas';
-import type { ImageFile } from 'librechat-data-provider';
 import type {
   Artifacts,
   FormattedToolResponse,
@@ -23,7 +23,12 @@ type ResultTarget = {
   expiredAt?: Date | null;
 };
 type JobScope = { userId: string; tenantId?: string; conversationId: string };
-type JobBinding = { key: string; fileId: string; toolCallId: string };
+type JobBinding = {
+  key: string;
+  fileId: string;
+  toolCallId: string;
+  generation?: FileGenerationDetails;
+};
 type PickupTarget = JobScope & { messageId: string; toolCallId: string };
 type Pickup = PickupTarget & { serverName: string; reference: string; expiresAt: number };
 type Dependencies = {
@@ -113,6 +118,23 @@ const downloadTicketSchema = z.object({
   ticket: z.string().regex(/^[A-Za-z0-9_-]{1,1024}={0,2}$/),
   expires_at: z.number().int().positive(),
 });
+const generationArgumentsSchema = z.object({
+  prompt: z.string().max(16384).optional().catch(undefined),
+  settings: z
+    .object({
+      steps: z.number().int().positive().optional().catch(undefined),
+    })
+    .optional()
+    .catch(undefined),
+});
+
+function imageGenerationDetails(args: unknown): FileGenerationDetails | undefined {
+  const parsed = generationArgumentsSchema.safeParse(args);
+  if (!parsed.success) return;
+  const prompt = parsed.data.prompt?.trim() ? parsed.data.prompt : undefined;
+  const steps = parsed.data.settings?.steps;
+  if (prompt != null || steps != null) return { prompt, steps };
+}
 
 function parseResult(text: string): unknown {
   try {
@@ -299,6 +321,7 @@ async function lookupImageJob({
         fileId: binding.fileId,
         toolCallId: binding.toolCallId,
         bindingKey: binding.key,
+        ...(binding.generation && { generation: binding.generation }),
       },
       deps.saveImage,
       signal,
@@ -521,6 +544,7 @@ export function createMCPImageInvoker({
         return storageFailed(reference);
       }
       const fileId = imageId(callId);
+      const generation = imageGenerationDetails(invocation.toolArguments);
       const failed = isMCPToolResultError(result);
       const pickup = !failed && enqueuePickup ? pickupSchema.safeParse(data).data : undefined;
       const expiresAt =
@@ -537,6 +561,7 @@ export function createMCPImageInvoker({
             key: bindingKey(serverName, reference),
             fileId,
             toolCallId,
+            ...(generation && { generation }),
             ...(expiresAt != null && { pickupExpiresAt: expiresAt }),
             ...(pickup?.resolution && { pickupResolution: pickup.resolution }),
           },
@@ -563,6 +588,7 @@ export function createMCPImageInvoker({
             fileId,
             toolCallId,
             bindingKey: bindingKey(serverName, reference),
+            ...(generation && { generation }),
           },
           deps.saveImage,
           invocation.options?.signal,
