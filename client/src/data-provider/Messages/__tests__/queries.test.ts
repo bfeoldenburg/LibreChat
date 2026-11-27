@@ -664,10 +664,11 @@ describe('background MCP image delivery in an open chat', () => {
       const messageId = 'original-reply';
       const toolCallId = 'qwen-call';
       const expiresAt = Date.now() + 60_000;
-      const name = `generate_image${Constants.mcp_delimiter}bfe-medien`;
+      const name = `${stored ? 'generate_image' : 'custom_resize'}${Constants.mcp_delimiter}bfe-medien`;
       const output = JSON.stringify({
         status: 'running',
         acceptance: 'confirmed',
+        ...(stored ? {} : { mcp_image_pickup: toolCallId }),
         pickup_expires_at: expiresAt,
       });
       const reply = message({

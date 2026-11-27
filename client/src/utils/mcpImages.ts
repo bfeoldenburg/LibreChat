@@ -40,21 +40,19 @@ export function pendingMCPImages(message: Message, now: number): Pickup[] {
       !('output' in tool)
     )
       continue;
-    if (
-      tool.name !== 'generate_image' &&
-      !tool.name.startsWith(`generate_image${Constants.mcp_delimiter}`)
-    )
-      continue;
+    const legacy = tool.name.split(Constants.mcp_delimiter, 1)[0] === 'generate_image';
     if (received(call.id) || typeof tool.output !== 'string' || tool.output.length > 2048) continue;
     try {
       const result: {
         status?: string;
         acceptance?: string;
+        mcp_image_pickup?: string;
         pickup_expires_at?: number;
         resolution?: Pickup['resolution'];
       } | null = JSON.parse(tool.output);
       if (
         result?.acceptance !== 'confirmed' ||
+        (!legacy && result.mcp_image_pickup !== call.id) ||
         (result.status !== 'queued' && result.status !== 'running') ||
         typeof result.pickup_expires_at !== 'number' ||
         !Number.isSafeInteger(result.pickup_expires_at) ||

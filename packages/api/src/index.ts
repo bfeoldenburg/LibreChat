@@ -52,6 +52,7 @@ export * from './mcp/assistants';
 export * from './mcp/request';
 export * from './mcp/agent';
 export * from './mcp/generation';
+export { createMCPImageInput } from './mcp/input';
 export * from './mcp/images';
 export * from './files/generatedStorage';
 export * from './mcp/reinitialize';

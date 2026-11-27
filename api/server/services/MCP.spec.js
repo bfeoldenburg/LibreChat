@@ -1643,6 +1643,63 @@ describe('User parameter passing tests', () => {
   });
 
   describe('createMCPTool', () => {
+    it('honors the server and tool name configured for image attachment forwarding', async () => {
+      const user = { id: 'media-user', role: 'USER' };
+      const toolName = 'read_dimensions';
+      const serverName = 'test-server';
+      const toolKey = `${toolName}${D}${serverName}`;
+      const config = {
+        type: 'streamable-http',
+        source: 'yaml',
+        url: 'https://media.example.com',
+      };
+      mockGetAppConfig.mockResolvedValue({
+        mcpSettings: { mediaImageAttachmentTools: { [serverName]: { [toolName]: 'read' } } },
+      });
+      require('~/models').getRoleByName.mockResolvedValue({
+        permissions: { [PermissionTypes.MCP_SERVERS]: { [Permissions.USE]: true } },
+      });
+      const callTool = jest.fn().mockResolvedValue(['ordinary output', undefined]);
+      mockGetMCPManager.mockReturnValue({ callTool });
+      const params = {
+        config,
+        user,
+        provider: 'openai',
+        toolKey,
+        availableTools: {
+          [toolKey]: {
+            function: {
+              description: 'Read dimensions',
+              parameters: { type: 'object', properties: {} },
+            },
+          },
+        },
+      };
+      const invokeConfig = {
+        configurable: { user },
+        metadata: {
+          provider: 'openai',
+          thread_id: '11111111-1111-4111-8111-111111111111',
+          run_id: 'response-message',
+        },
+        toolCall: { id: 'attachment-read' },
+      };
+
+      const configured = await createMCPTool(params);
+      expect(configured.mcpRequiresEphemeralConnection).toBe(true);
+      const result = await configured.func({}, undefined, invokeConfig);
+      expect(JSON.parse(result[0].content)).toMatchObject({ status: 'image_input_unavailable' });
+      expect(callTool).not.toHaveBeenCalled();
+
+      mockGetAppConfig.mockResolvedValue({});
+      const ordinary = await createMCPTool(params);
+      expect(ordinary.mcpRequiresEphemeralConnection).toBe(false);
+      await expect(ordinary.func({}, undefined, invokeConfig)).resolves.toEqual([
+        'ordinary output',
+        undefined,
+      ]);
+    });
+
     it('preserves the full MCP tuple for the Assistants required-action sink', async () => {
       const mockUser = { id: 'assistants-app-user', role: 'USER' };
       const mockRes = { write: jest.fn(), flush: jest.fn() };

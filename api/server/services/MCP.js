@@ -25,6 +25,8 @@ const {
   processMCPEnv,
   createAgentMCPTool,
   createMCPImageInvoker,
+  resolveMCPImageAttachmentMode,
+  createMCPImageInput,
   createMCPImagePickup,
   createMCPImageStorage,
   resolveDownloadPath,
@@ -562,6 +564,13 @@ const imageJobs = {
   getConvo: db.getConvo,
   getAppConfig,
   saveImage: saveMCPImage,
+  loadInput: createMCPImageInput({
+    getFiles: db.getFiles,
+    readStoredImage: (req, file, path, signal) =>
+      require('~/server/services/Files/strategies')
+        .getStrategyFunctions(file.source)
+        .getDownloadStream(req, path, { signal }),
+  }),
 };
 const enqueuePickup = createMCPImagePickup({
   deps: {
@@ -1131,13 +1140,12 @@ async function createMCPToolImpl({
   const requestScopedTools = serverConfig ? requiresEphemeralUserConnection(serverConfig) : false;
   const useMissingToolCache = !requestScopedTools;
   const missingToolCacheKey = getMCPConnectionPoolKey(toolKey, capabilityProfile);
+  const appConfig =
+    serverConfig?.url || serverConfig?.source === 'yaml'
+      ? await getAppConfig({ role: user?.role, tenantId: user?.tenantId, userId: user?.id })
+      : undefined;
 
   if (serverConfig?.url) {
-    const appConfig = await getAppConfig({
-      role: user?.role,
-      tenantId: user?.tenantId,
-      userId: user?.id,
-    });
     recoveryPolicy ??= appConfig?.mcpSettings?.catalogRecovery;
     const allowedDomains = appConfig?.mcpSettings?.allowedDomains;
     const allowedAddresses = appConfig?.mcpSettings?.allowedAddresses;
@@ -1248,6 +1256,7 @@ async function createMCPToolImpl({
 
   return createToolInstance({
     invokeTool,
+    mediaImageAttachmentTools: appConfig?.mcpSettings?.mediaImageAttachmentTools,
     scheduledBearerInvocation: bindScheduledMCPBearerInvocation(
       requestScopedConnections,
       agentId,
@@ -1288,6 +1297,7 @@ async function createMCPToolImpl({
 
 function createToolInstance({
   invokeTool,
+  mediaImageAttachmentTools,
   scheduledBearerInvocation,
   scheduledMCPInvocation,
   res,
@@ -1312,7 +1322,12 @@ function createToolInstance({
   unattended,
   recoveryPolicy,
 }) {
-  const invokeImageTool = createMCPImageInvoker({ invokeTool, deps: imageJobs, enqueuePickup });
+  const invokeImageTool = createMCPImageInvoker({
+    invokeTool,
+    deps: imageJobs,
+    enqueuePickup,
+    mediaImageAttachmentTools,
+  });
   /** @type {LCTool} */
   const { description, parameters } = toolDefinition;
   const isGoogle = capturedProvider === Providers.VERTEXAI || capturedProvider === Providers.GOOGLE;
@@ -1579,10 +1594,15 @@ function createToolInstance({
   // connection down at request end, so they must never be backgrounded. A
   // missing/stale config means the server's lifetime is unknowable, so fail
   // closed (foreground) rather than risk a detached call against a torn-down
-  // connection.
-  toolInstance.mcpRequiresEphemeralConnection = capturedServerConfig
-    ? requiresEphemeralUserConnection(capturedServerConfig)
-    : true;
+  // connection. Image attachment forwarding also needs the live chat turn.
+  toolInstance.mcpRequiresEphemeralConnection =
+    !capturedServerConfig ||
+    requiresEphemeralUserConnection(capturedServerConfig) ||
+    resolveMCPImageAttachmentMode(mediaImageAttachmentTools, {
+      serverName,
+      toolName: serverToolName,
+      serverConfig: capturedServerConfig,
+    }) != null;
   // On Google/Vertex, propagate the union-flattened schema so definitions extracted
   // from this instance don't reach the Gemini converter with unsupported unions.
   toolInstance.mcpJsonSchema = isGoogle ? schema : parameters;

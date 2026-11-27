@@ -72,9 +72,34 @@ type Dependencies = {
     tenantId?: string;
   }) => Promise<AppConfig | undefined>;
   saveImage: (input: ImageStorageInput) => Promise<ImageFile>;
+  loadInput?: (
+    scope: JobScope,
+    fileIds: readonly string[],
+    config: AppConfig,
+    signal?: AbortSignal,
+  ) => Promise<string | undefined>;
 };
 type LookupDependencies = Pick<Dependencies, 'getConvo' | 'findJob' | 'getAppConfig' | 'saveImage'>;
 type LookupTool = 'get_media_job_status' | 'get_media_result';
+type ImageAttachmentTools = NonNullable<AppConfig['mcpSettings']>['mediaImageAttachmentTools'];
+
+export function resolveMCPImageAttachmentMode(
+  tools: ImageAttachmentTools,
+  {
+    serverName,
+    toolName,
+    serverConfig,
+  }: Pick<Parameters<AgentMCPToolInvoker>[1], 'serverName' | 'toolName' | 'serverConfig'>,
+): 'read' | 'image_job' | undefined {
+  if (
+    serverConfig?.source !== 'yaml' ||
+    !tools ||
+    !Object.prototype.hasOwnProperty.call(tools, serverName)
+  )
+    return;
+  const server = tools[serverName];
+  if (server && Object.prototype.hasOwnProperty.call(server, toolName)) return server[toolName];
+}
 const targetSchema = z.object({
   conversationId: z.string().uuid(),
   messageId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
@@ -82,7 +107,7 @@ const targetSchema = z.object({
 });
 const jobReference = z.string().regex(/^[0-9a-f]{32}$/);
 const lookupSchema = z.strictObject({ job_reference: jobReference });
-const startedSchema = z.object({
+const startedSchema = z.looseObject({
   job_reference: jobReference,
   delivery_status: z.enum(['not_started', 'pending', 'failed']),
 });
@@ -147,12 +172,15 @@ function parseResult(text: string): unknown {
 function lookupError(
   tool: string,
   status:
+    | 'image_input_unavailable'
     | 'job_unavailable'
     | 'invalid_parameters'
     | 'backend_unavailable'
     | 'image_download_failed',
 ): FormattedToolResponse {
   const messages = {
+    image_input_unavailable:
+      'Genau ein PNG-, JPEG- oder WebP-Bild bis 4 MiB an die aktuelle Nachricht anhängen.',
     job_unavailable: 'Dieser Bildauftrag ist nicht verfügbar. Keinen Ersatzauftrag starten.',
     invalid_parameters: 'Nur die öffentliche Auftragsreferenz job_reference angeben.',
     backend_unavailable:
@@ -444,10 +472,12 @@ export function createMCPImageInvoker({
   invokeTool,
   deps,
   enqueuePickup,
+  mediaImageAttachmentTools,
 }: {
   invokeTool: AgentMCPToolInvoker;
   deps: Dependencies;
   enqueuePickup?: (pickup: Pickup) => void;
+  mediaImageAttachmentTools?: ImageAttachmentTools;
 }): (
   manager: Parameters<AgentMCPToolInvoker>[0],
   invocation: Parameters<AgentMCPToolInvoker>[1],
@@ -456,8 +486,12 @@ export function createMCPImageInvoker({
   const dispatched = new Set<string>();
   return async (manager, invocation, context) => {
     const { toolName, serverName } = invocation;
-    const lookup = toolName === 'get_media_job_status' || toolName === 'get_media_result';
-    if (!lookup && toolName !== 'generate_image') return invokeTool(manager, invocation);
+    const attachmentMode = resolveMCPImageAttachmentMode(mediaImageAttachmentTools, invocation);
+    const lookup =
+      !attachmentMode && (toolName === 'get_media_job_status' || toolName === 'get_media_result');
+    if (!lookup && !attachmentMode && toolName !== 'generate_image') {
+      return invokeTool(manager, invocation);
+    }
     const user = invocation.user;
     const target = targetSchema.safeParse(context);
     const scope =
@@ -495,14 +529,50 @@ export function createMCPImageInvoker({
             .digest('hex')
         : undefined;
     const config = scope ? await getConfig()?.catch(() => undefined) : undefined;
+    let imageInput: string | undefined;
+    if (attachmentMode) {
+      if (
+        resolveMCPImageAttachmentMode(
+          config?.mcpSettings?.mediaImageAttachmentTools,
+          invocation,
+        ) !== attachmentMode
+      ) {
+        return invokeTool(manager, invocation);
+      }
+      if (!scope || !callId || !config || invocation.unattended || !deps.loadInput) {
+        return lookupError(toolName, 'image_input_unavailable');
+      }
+      const signal = invocation.options?.signal;
+      try {
+        imageInput = await deps.loadInput(
+          scope,
+          invocation.requestScopedConnections?.mediaInputFileIds ?? [],
+          config,
+          signal,
+        );
+      } catch {
+        signal?.throwIfAborted();
+      }
+      if (!imageInput) return lookupError(toolName, 'image_input_unavailable');
+      if (attachmentMode === 'read') {
+        return invokeTool(manager, {
+          ...invocation,
+          requestMeta: () => ({ 'librechat/image-input': imageInput }),
+        });
+      }
+    }
     const result = await invokeTool(manager, {
       ...invocation,
+      nativeImageResult: attachmentMode === 'image_job',
       directMediaDownload: !!config?.mcpSettings?.mediaDownloadOrigin,
       ...(callId && {
         requestMeta: () => {
           const newIntent = !dispatched.has(callId);
           dispatched.add(callId);
-          return { 'librechat/call': { call_id: callId, new_intent: newIntent } };
+          return {
+            'librechat/call': { call_id: callId, new_intent: newIntent },
+            ...(imageInput && { 'librechat/image-input': imageInput }),
+          };
         },
       }),
     });
@@ -572,7 +642,14 @@ export function createMCPImageInvoker({
       if (failed) return result;
       if (expiresAt != null && pickup?.status !== 'image_ready') {
         enqueuePickup?.({ ...scope, messageId, toolCallId, serverName, reference, expiresAt });
-        return [result[0], undefined];
+        return [
+          JSON.stringify({
+            ...started,
+            mcp_image_pickup: toolCallId,
+            pickup_expires_at: expiresAt,
+          }),
+          undefined,
+        ];
       }
       const ready = resultSchema.safeParse(data).data;
       if (!ready) return result;
@@ -601,6 +678,7 @@ export function createMCPImageInvoker({
             status: 'running',
             acceptance: 'confirmed',
             job_reference: reference,
+            mcp_image_pickup: toolCallId,
             pickup_expires_at: expiresAt,
             resolution: ready.resolution,
             message: 'LibreChat holt das fertige Bild im Hintergrund ab.',

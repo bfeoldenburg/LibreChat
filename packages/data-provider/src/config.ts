@@ -4926,6 +4926,13 @@ export const configSchema = z.object({
     .prefault({}),
   mcpSettings: z
     .object({
+      /** Image attachment forwarding modes by YAML server name and upstream tool name. */
+      mediaImageAttachmentTools: z
+        .record(
+          z.string().min(1).max(128),
+          z.record(z.string().min(1).max(128), z.enum(['read', 'image_job'])),
+        )
+        .optional(),
       /** Trusted FastAPI origin for server-side transfers of MCP-generated media. */
       mediaDownloadOrigin: z
         .string()

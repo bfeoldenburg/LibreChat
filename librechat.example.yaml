@@ -693,6 +693,12 @@ actions:
 #   # New MCP Apps require explicit opt-in. If omitted, legacy inline HTML remains enabled;
 #   # false disables both MCP Apps and legacy inline HTML.
 #   apps: true
+#   # Forward one owned image from the current turn to these tools on a YAML-defined MCP server.
+#   # Use read for direct results and image_job for tools that support native image job pickup.
+#   mediaImageAttachmentTools:
+#     my-media-server:
+#       get_image_info: read
+#       upscale_image: image_job
 #   oauthFailureRetentionMs: 86400000 # how long a failed OAuth reconnection is remembered
 #   allowedDomains:
 #     - 'host.docker.internal'    # Docker host access (required for Docker setups)

@@ -337,6 +337,8 @@ export interface UserConnectionContext {
 }
 
 export interface RequestScopedMCPConnectionStore {
+  /** Uploaded file IDs captured from the current chat turn. */
+  mediaInputFileIds?: readonly string[];
   connections: Map<string, unknown>;
   pending: Map<string, Promise<unknown>>;
   disposeConnection?: (connectionKey: string, connection: unknown) => Promise<void>;

@@ -3,6 +3,7 @@ import { Constants } from 'librechat-data-provider';
 
 import type { MCPRuntimeRequestBody, RequestScopedMCPConnectionStore } from './types';
 import type { RequestBody } from '~/types';
+import { readMCPImageFileIds } from './input';
 
 export type { MCPRuntimeRequestBody } from './types';
 
@@ -270,6 +271,7 @@ export function getMCPRequestContext(
     }
 
     context = createMCPRequestContext();
+    context.mediaInputFileIds = readMCPImageFileIds(req);
     context.cleanupOnResponse = cleanupOnResponse;
     contexts.set(req, context);
   } else if (!cleanupOnResponse) {

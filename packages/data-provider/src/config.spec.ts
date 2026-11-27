@@ -2273,6 +2273,29 @@ describe('allowedAddressesSchema', () => {
       expect(result.success).toBe(true);
     });
 
+    it('accepts image attachment modes by MCP server and tool', () => {
+      const tools = {
+        'bfe-medien': { get_image_info: 'read', upscale_image: 'image_job' },
+        'other-server': { inspect: 'read' },
+      };
+      const configuration = {
+        version: '1.0',
+        mcpSettings: { mediaImageAttachmentTools: tools },
+      };
+      expect(configSchema.parse(configuration).mcpSettings?.mediaImageAttachmentTools).toEqual(
+        tools,
+      );
+      expect(
+        configSchema.parse({ version: '1.0' }).mcpSettings?.mediaImageAttachmentTools,
+      ).toBeUndefined();
+      expect(
+        configSchema.safeParse({
+          ...configuration,
+          mcpSettings: { mediaImageAttachmentTools: { 'bfe-medien': { inspect: 'unknown' } } },
+        }).success,
+      ).toBe(false);
+    });
+
     it('defaults and validates MCP catalog recovery controls', () => {
       const defaults = configSchema.parse({ version: '1.0', mcpSettings: {} });
       expect(defaults.mcpSettings?.catalogRecovery).toEqual({

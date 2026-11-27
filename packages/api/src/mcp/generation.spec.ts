@@ -1,3 +1,4 @@
+import { FileSources } from 'librechat-data-provider';
 import type { IUser, AppConfig } from '@librechat/data-schemas';
 import type { ImageFile } from 'librechat-data-provider';
 import type { AgentMCPToolInvoker } from './agent';
@@ -8,6 +9,11 @@ import { isMCPToolResultError, markMCPToolResultError } from './status';
 const conversationId = '11111111-1111-4111-8111-111111111111';
 const context = { conversationId, messageId: 'trusted-answer', toolCallId: 'qwen-call' };
 const dataUrl = 'data:image/png;base64,c3ludGhldGlj';
+const appConfig: AppConfig = {
+  config: {},
+  fileStrategy: FileSources.local,
+  imageOutputType: 'png',
+};
 function harness(image = true) {
   const saved = { conversationId, isCreatedByUser: false, isUserSubmitted: false };
   const deps = {
@@ -15,7 +21,7 @@ function harness(image = true) {
     findJob: jest.fn(async () => null),
     saveMessage: jest.fn(async (): Promise<typeof saved | undefined> => saved),
     getConvo: jest.fn(async () => ({})),
-    getAppConfig: jest.fn(async () => ({}) as AppConfig),
+    getAppConfig: jest.fn(async (): Promise<AppConfig> => appConfig),
     saveImage: jest.fn(
       async (_input: ImageStorageInput) => ({ file_id: 'native-display' }) as ImageFile,
     ),
@@ -176,4 +182,154 @@ it('isolates native job images from model content and passes unrelated image res
     content: [],
   });
   expect(missing && isMCPToolResultError(missing)).toBe(true);
+});
+
+it.each(['upscale_image', 'outpaint_image', 'custom_resize'])(
+  'reads the owned turn attachment for %s and binds its result',
+  async (toolName) => {
+    const h = harness();
+    const loadInput = jest.fn(async () => 'aW1hZ2U=');
+    const mediaImageAttachmentTools = { 'bfe-medien': { [toolName]: 'image_job' as const } };
+    h.deps.getAppConfig.mockResolvedValue({
+      ...appConfig,
+      mcpSettings: { mediaImageAttachmentTools },
+    });
+    const fileIds = ['bc14b3b8-458e-456f-8677-f2da2b6f027e'];
+    const invocation = {
+      ...h.invocation,
+      toolName,
+      serverConfig: {
+        source: 'yaml' as const,
+        type: 'streamable-http' as const,
+        url: 'http://media.invalid',
+      },
+      requestScopedConnections: {
+        connections: new Map(),
+        pending: new Map(),
+        mediaInputFileIds: fileIds,
+      },
+    };
+    const call = createMCPImageInvoker({
+      invokeTool: h.invokeTool,
+      deps: { ...h.deps, loadInput },
+      mediaImageAttachmentTools,
+    });
+
+    await call(h.manager, invocation, context);
+    expect(loadInput).toHaveBeenCalledWith(
+      { conversationId, userId: h.invocation.user?.id, tenantId: undefined },
+      fileIds,
+      expect.anything(),
+      undefined,
+    );
+    expect(h.invokeTool.mock.calls[0][1].requestMeta?.()).toMatchObject({
+      'librechat/image-input': 'aW1hZ2U=',
+    });
+    expect(h.deps.saveImage).toHaveBeenCalledTimes(1);
+
+    await call(h.manager, { ...invocation, serverName: 'other' }, context);
+    await call(
+      h.manager,
+      { ...invocation, serverConfig: { ...invocation.serverConfig, source: 'user' } },
+      context,
+    );
+    expect(loadInput).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each(['get_image_info', 'read_dimensions'])(
+  'forwards an image to configured read tool %s',
+  async (toolName) => {
+    const h = harness();
+    const loadInput = jest.fn(async () => 'aW1hZ2U=');
+    const mediaImageAttachmentTools = { 'bfe-medien': { [toolName]: 'read' as const } };
+    h.deps.getAppConfig.mockResolvedValue({
+      ...appConfig,
+      mcpSettings: { mediaImageAttachmentTools },
+    });
+    const info = { width: 800, height: 600, mime_type: 'image/png' };
+    h.invokeTool.mockImplementation(async () => [JSON.stringify(info), undefined]);
+    const call = createMCPImageInvoker({
+      invokeTool: h.invokeTool,
+      deps: { ...h.deps, loadInput },
+      mediaImageAttachmentTools,
+    });
+    const invocation = {
+      ...h.invocation,
+      toolName,
+      toolArguments: {},
+      serverConfig: {
+        source: 'yaml' as const,
+        type: 'streamable-http' as const,
+        url: 'http://media.invalid',
+      },
+    };
+
+    await expect(call(h.manager, invocation, context)).resolves.toEqual([
+      JSON.stringify(info),
+      undefined,
+    ]);
+    expect(h.invokeTool.mock.calls[0][1].requestMeta?.()).toEqual({
+      'librechat/image-input': 'aW1hZ2U=',
+    });
+    expect(h.deps.bindJob).not.toHaveBeenCalled();
+    expect(h.deps.saveImage).not.toHaveBeenCalled();
+
+    await call(h.manager, { ...invocation, serverName: 'other' }, context);
+    expect(h.invokeTool.mock.calls[1][1].requestMeta).toBeUndefined();
+    await call(h.manager, { ...invocation, toolName: 'unlisted' }, context);
+    expect(h.invokeTool.mock.calls[2][1].requestMeta).toBeUndefined();
+    h.deps.getAppConfig.mockResolvedValue({
+      ...appConfig,
+      mcpSettings: { mediaImageAttachmentTools: {} },
+    });
+    await call(h.manager, invocation, context);
+    expect(h.invokeTool.mock.calls[3][1].requestMeta).toBeUndefined();
+    expect(loadInput).toHaveBeenCalledTimes(1);
+  },
+);
+
+it('marks a bound pending image for any configured image job tool name', async () => {
+  const h = harness(false);
+  const expires = Date.now() + 60_000;
+  const toolName = 'custom_resize';
+  const mediaImageAttachmentTools = { 'bfe-medien': { [toolName]: 'image_job' as const } };
+  h.deps.getAppConfig.mockResolvedValue({
+    ...appConfig,
+    mcpSettings: { mediaImageAttachmentTools },
+  });
+  h.invokeTool.mockImplementation(async () => [
+    JSON.stringify({
+      status: 'queued',
+      job_reference: 'a'.repeat(32),
+      delivery_status: 'not_started',
+      acceptance: 'confirmed',
+      pickup_expires_at: expires,
+    }),
+    undefined,
+  ]);
+  const enqueuePickup = jest.fn();
+  const call = createMCPImageInvoker({
+    invokeTool: h.invokeTool,
+    deps: { ...h.deps, loadInput: async () => 'aW1hZ2U=' },
+    enqueuePickup,
+    mediaImageAttachmentTools,
+  });
+  const [payload] = await call(
+    h.manager,
+    {
+      ...h.invocation,
+      toolName,
+      serverConfig: { source: 'yaml', type: 'streamable-http', url: 'http://media.invalid' },
+    },
+    context,
+  );
+  expect(JSON.parse(payload)).toMatchObject({
+    status: 'queued',
+    mcp_image_pickup: context.toolCallId,
+    pickup_expires_at: expires,
+  });
+  expect(enqueuePickup).toHaveBeenCalledWith(
+    expect.objectContaining({ toolCallId: context.toolCallId }),
+  );
 });
